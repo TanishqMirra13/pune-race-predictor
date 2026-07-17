@@ -1,0 +1,9 @@
+# Committed app config (safe to share). Real secrets go in secrets.toml, which
+# is gitignored.
+[server]
+headless = true
+# Streamlit Community Cloud sets the port itself; this is just for local runs.
+
+[theme]
+base = "dark"
+primaryColor = "#11a14e"

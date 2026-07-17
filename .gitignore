@@ -1,0 +1,26 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Scraper HTML cache -- large (~68MB) and fully regenerable from the live sites,
+# so it does NOT ship in the repo. The SQLite DB below already holds the parsed
+# data, and the app re-fetches fresh pages on demand.
+data/cache/
+
+# Ignore everything else in data/ (loose dev sample HTML/PDF/JSON, ~4.5MB) --
+# EXCEPT the seed database, which we want to ship so the deployed app has all
+# the backfilled races/workouts/calibration on first boot.
+data/*
+!data/pune_racing.db
+
+# Dev scratch specs not part of the app
+docs/
+
+# Streamlit local secrets (never commit real secrets)
+.streamlit/secrets.toml
+
+# OS junk
+.DS_Store
+Thumbs.db

@@ -1,0 +1,6 @@
+streamlit==1.59.1
+pdfplumber==0.11.10
+requests==2.34.2
+beautifulsoup4==4.15.0
+pandas==3.0.3
+lxml==6.1.1
