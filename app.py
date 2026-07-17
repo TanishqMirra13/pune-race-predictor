@@ -12,6 +12,7 @@ from scrapers import rwitc, btc
 from models.rating_engine import compute_composite_scores
 from models.staking import (
     build_win_place_plan, harville_forecast_probabilities, jackpot_leg_plan, stop_rules,
+    build_place_shortlist,
 )
 
 st.set_page_config(page_title="Pune Race Predictor", layout="wide")
@@ -146,8 +147,8 @@ def get_race_plans(d: str, v: str) -> list[dict]:
 
 race_plans = get_race_plans(date_str, venue)
 
-tab_today, tab_forecast, tab_jackpot, tab_connections, tab_backtest, tab_bankroll = st.tabs(
-    ["Today's Picks", "Forecast / Quinella", "Jackpot Planner", "Connections", "Backtest", "Bankroll & Calibration"]
+tab_today, tab_place, tab_forecast, tab_jackpot, tab_connections, tab_backtest, tab_bankroll = st.tabs(
+    ["Today's Picks", "Place Bets", "Forecast / Quinella", "Jackpot Planner", "Connections", "Backtest", "Bankroll & Calibration"]
 )
 
 with tab_today:
@@ -222,6 +223,54 @@ with tab_today:
                 )
                 for e in rp["entries"][:3]:
                     st.caption(e["reasoning"])
+
+with tab_place:
+    st.subheader("Place bets — top-2 / top-3 finish")
+    st.markdown(
+        "**Lower variance, not higher edge.** A place bet hits far more often "
+        "than a win bet but pays a fraction as much, so the same rule applies: "
+        "only bet when the board's place dividend beats the horse's fair place "
+        "price. The real money-maker here is the **consistent placer** — a horse "
+        "that runs 2nd/3rd a lot but rarely wins, which the crowd underbets in "
+        "the place pool. Those are tagged 🎯 **VALUE** below."
+    )
+    st.caption(
+        "Places paid (verified from RWITC tote data): 8+ runners → 3 places, "
+        "5–7 → 2 places, 4 or fewer → win-only (no place pool). Place % is our "
+        "own estimate from the win model (Harville) — the tote doesn't publish "
+        "pre-race place odds, so price it at the board with: fair place odds = "
+        "(100 ÷ place%) − 1."
+    )
+    if not race_plans:
+        st.info("Load a race card first.")
+    else:
+        shortlist = build_place_shortlist(race_plans)
+        for sl in shortlist:
+            rp = next(r for r in race_plans if r["race_no"] == sl["race_no"])
+            title = f"Race {sl['race_no']}: {rp['race_name']}"
+            if sl["places_paid"] == 0:
+                with st.expander(f"{title} — win-only ({sl['field_size']} runners, no place pool)"):
+                    st.write("Too few runners for a place pool.")
+                continue
+            with st.expander(f"{title} — {sl['places_paid']} places paid ({sl['field_size']} runners)"):
+                st.dataframe(
+                    [{"Horse": p["horse_name"],
+                      "Place %": f"{p['place_probability']*100:.0f}%",
+                      "Fair place odds": f"{(100/(p['place_probability']*100) - 1):.2f}/1" if p["place_probability"] > 0 else "-",
+                      "Win %": f"{p['win_probability']*100:.0f}%",
+                      "Value": "🎯 VALUE" if p["value_flag"] else ""}
+                     for p in sl["picks"]],
+                    use_container_width=True, hide_index=True,
+                )
+                value_picks = [p for p in sl["picks"] if p["value_flag"]]
+                if value_picks:
+                    for p in value_picks:
+                        st.caption(
+                            f"🎯 **{p['horse_name']}** — {p['place_probability']*100:.0f}% to place but only "
+                            f"{p['win_probability']*100:.0f}% to win: a consistent-placer profile the crowd "
+                            f"tends to underprice in the place pool. Bet to place only if the board pays more "
+                            f"than {(100/(p['place_probability']*100) - 1):.2f}/1."
+                        )
 
 with tab_forecast:
     if not race_plans:

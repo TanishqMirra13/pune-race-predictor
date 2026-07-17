@@ -165,3 +165,14 @@ with the winner is fixed):
   time, including same-day results for races already run -- there's no
   point-in-time cutoff, so re-scoring a past race day isn't a strict
   backtest (a known simplification, not silently hidden).
+
+## Place bets (top-2 / top-3)
+
+A dedicated **Place Bets** tab derives each horse's probability of finishing
+in the paid places from the win model (Harville order statistics), and flags
+🎯 **VALUE** — consistent placers (high place %, low win %) the crowd tends to
+underprice in the place pool. Places paid are verified empirically from RWITC
+tote dividends: **8+ runners → 3 places, 5–7 → 2, ≤4 → win-only**. Lower
+variance than win betting, not higher edge — the same fair-odds discipline
+applies (fair place odds = 100 ÷ place% − 1), and there are no pre-race place
+odds published, so it's a shortlist to price up at the board.

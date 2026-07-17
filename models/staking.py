@@ -104,6 +104,86 @@ def harville_forecast_probabilities(win_probs: dict, top_n: int = 3) -> list[dic
     return pairs[:top_n]
 
 
+def places_paid_for_field(field_size: int) -> int:
+    """Tote places paid, verified empirically against RWITC dividend data:
+    8+ runners pay 3, 5-7 pay 2, 4 or fewer have no place pool (win only).
+    Field size = declared (non-scratched) runners on the card."""
+    if field_size >= 8:
+        return 3
+    if field_size >= 5:
+        return 2
+    return 0
+
+
+def place_probabilities(win_probs: dict, places_paid: int) -> dict:
+    """Probability each horse finishes within the paid places, derived from the
+    model's WIN probabilities via the Harville order-statistics model:
+      P(top1)=p_i; P(top2)=p_i + Σ_j p_j·p_i/(1-p_j);
+      P(top3)=P(top2) + Σ_{j≠k} p_j·(p_k/(1-p_j))·(p_i/(1-p_j-p_k)).
+    Returns {horse_id: place_probability}. This is our own estimate -- the tote
+    doesn't publish pre-race place odds, so compare it to the board yourself."""
+    items = list(win_probs.items())
+    result = {}
+    for hid_i, (_, p_i) in items:
+        prob = p_i  # finishing 1st always counts as placing
+        if places_paid >= 2:
+            for hid_j, (_, p_j) in items:
+                if hid_j == hid_i or p_j >= 1.0:
+                    continue
+                prob += p_j * (p_i / (1 - p_j))
+        if places_paid >= 3:
+            for hid_j, (_, p_j) in items:
+                if hid_j == hid_i:
+                    continue
+                for hid_k, (_, p_k) in items:
+                    if hid_k in (hid_i, hid_j):
+                        continue
+                    denom = 1 - p_j - p_k
+                    if denom <= 0 or (1 - p_j) <= 0:
+                        continue
+                    prob += p_j * (p_k / (1 - p_j)) * (p_i / denom)
+        result[hid_i] = min(prob, 1.0)
+    return result
+
+
+def build_place_shortlist(race_plans: list[dict]) -> list[dict]:
+    """Per race, rank runners by place probability and flag 'value' candidates:
+    consistent placers the crowd underrates -- high place probability but NOT
+    the model's top win pick (the short-priced favourite, whose place dividend
+    is usually too cramped to be worth backing). No live place odds exist
+    pre-race, so this is a shortlist to price up at the board, not a guaranteed
+    bet."""
+    out = []
+    for rp in race_plans:
+        entries = rp.get("entries", [])
+        field_size = len(entries)
+        places = places_paid_for_field(field_size)
+        if places == 0 or not entries:
+            out.append({"race_no": rp["race_no"], "places_paid": 0, "field_size": field_size, "picks": []})
+            continue
+        win_probs = {e["horse_id"]: (e["horse_name"], e["win_probability"]) for e in entries}
+        pp = place_probabilities(win_probs, places)
+        top_win_id = max(win_probs, key=lambda k: win_probs[k][1])
+        picks = []
+        for e in entries:
+            pplace = pp.get(e["horse_id"], 0.0)
+            # "value" heuristic: strong place chance but not the favourite the
+            # crowd will over-back into a tiny place dividend.
+            is_value = pplace >= 0.55 and e["horse_id"] != top_win_id and e["win_probability"] < 0.30
+            picks.append({
+                "horse_name": e["horse_name"],
+                "place_probability": pplace,
+                "win_probability": e["win_probability"],
+                "value_flag": is_value,
+            })
+        picks.sort(key=lambda x: x["place_probability"], reverse=True)
+        out.append({
+            "race_no": rp["race_no"], "places_paid": places, "field_size": field_size,
+            "picks": picks[:5],
+        })
+    return out
+
+
 def jackpot_leg_plan(legs: list[dict], unit_cost: float = 5.0, budget: float | None = None) -> dict:
     """legs: [{'race_no': int, 'entries': [...rating_engine entries, sorted...]}]
     For each leg: banker (1 horse) if top pick clears BANKER_PROBABILITY_THRESHOLD,
