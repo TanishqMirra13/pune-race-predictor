@@ -169,6 +169,43 @@ with tab_today:
                 for s in plan["skipped_races"]:
                     st.write(f"Race {s['race_no']}: {s['reason']}")
 
+        results_by_race = {}
+        for rp in race_plans:
+            rows = conn.execute(
+                """SELECT h.name, res.finish_position FROM runs r JOIN horses h ON h.id = r.horse_id
+                   JOIN results res ON res.run_id = r.id
+                   WHERE r.race_id = ? AND res.finish_position IS NOT NULL ORDER BY res.finish_position""",
+                (rp["race_id"],),
+            ).fetchall()
+            if rows:
+                results_by_race[rp["race_no"]] = rows
+
+        if results_by_race:
+            st.divider()
+            st.subheader(f"Results so far -- {len(results_by_race)}/{len(race_plans)} races run")
+            scorecard = []
+            wins = places = 0
+            for rp in race_plans:
+                rows = results_by_race.get(rp["race_no"])
+                if not rows or not rp["entries"]:
+                    continue
+                pick = rp["entries"][0]["horse_name"]
+                pos = next((r["finish_position"] for r in rows if r["name"].upper() == pick.upper()), None)
+                if pos == 1:
+                    outcome, wins, places = "✅ WON", wins + 1, places + 1
+                elif pos and pos <= 3:
+                    outcome, places = f"🥈 {pos}", places + 1
+                elif pos:
+                    outcome = f"❌ {pos}th"
+                else:
+                    outcome = "❌ unplaced/scratched"
+                scorecard.append({"Race": rp["race_no"], "Our pick": pick, "Winner": rows[0]["name"], "Result": outcome})
+            if scorecard:
+                st.dataframe(scorecard, use_container_width=True, hide_index=True)
+                st.caption(f"Top picks: {wins}/{len(scorecard)} won, {places}/{len(scorecard)} placed top-3. Full detail and dividends are in each race's expander below.")
+            if len(results_by_race) < len(race_plans):
+                st.caption("Not all races have results yet -- click 'Fetch results' in the sidebar to update as the day progresses.")
+
         st.divider()
         st.subheader("Race-by-race breakdown")
         for rp in race_plans:
@@ -204,6 +241,42 @@ with tab_today:
                      for i, e in enumerate(rp["entries"])],
                     use_container_width=True, hide_index=True,
                 )
+                finishers = conn.execute(
+                    """SELECT h.name, res.finish_position, res.dividend_win, res.dividend_place,
+                              r.jockey, r.odds_sp
+                       FROM runs r JOIN horses h ON h.id = r.horse_id
+                       JOIN results res ON res.run_id = r.id
+                       WHERE r.race_id = ? AND res.finish_position IS NOT NULL
+                       ORDER BY res.finish_position""",
+                    (rp["race_id"],),
+                ).fetchall()
+                if finishers:
+                    st.markdown("**Actual result**")
+                    st.dataframe(
+                        [{"Pos": f["finish_position"], "Horse": f["name"], "Jockey": f["jockey"],
+                          "Odds": f["odds_sp"], "Win div (Rs/10)": f["dividend_win"]}
+                         for f in finishers[:5]],
+                        use_container_width=True, hide_index=True,
+                    )
+                    winner = finishers[0]["name"]
+                    fav_row = conn.execute("SELECT tote_favourite FROM races WHERE id=?", (rp["race_id"],)).fetchone()
+                    fav = fav_row["tote_favourite"] if fav_row else None
+                    top_pick = rp["entries"][0]
+                    pick_result = next((f["finish_position"] for f in finishers if f["name"].upper() == top_pick["horse_name"].upper()), None)
+                    if pick_result == 1:
+                        verdict = f"✅ Our top pick **{top_pick['horse_name']}** WON."
+                    elif pick_result and pick_result <= 3:
+                        verdict = f"🥈 Our top pick **{top_pick['horse_name']}** placed ({pick_result}{'nd' if pick_result==2 else 'rd'}), didn't win."
+                    elif pick_result:
+                        verdict = f"❌ Our top pick **{top_pick['horse_name']}** finished {pick_result}th, unplaced."
+                    else:
+                        verdict = f"Our top pick **{top_pick['horse_name']}** did not finish/was scratched."
+                    if fav:
+                        verdict += f" Tote favourite was **{fav}** ({'won' if fav.upper()==winner.upper() else 'did not win'})."
+                    st.info(verdict)
+                else:
+                    st.caption("No result recorded yet for this race -- use 'Fetch results' in the sidebar once it's run.")
+
                 worked = [e for e in rp["entries"] if e.get("workout_note")]
                 if worked:
                     with st.expander(f"Recent trackwork / mock races ({len(worked)} runners with recorded work)"):
