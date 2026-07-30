@@ -8,10 +8,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from db.schema import get_connection, init_db
 from db.ingest import (
-    load_market_odds, save_parlay, settle_parlays, store_intl_racecard,
-    store_intl_results, store_market_odds, store_racecard, store_raceresult,
+    load_market_odds, odds_age_minutes, save_parlay, settle_parlays,
+    store_intl_racecard, store_intl_results, store_market_odds, store_racecard,
+    store_raceresult,
 )
-from scrapers import rwitc, btc, hkjc, odds_import, racingaustralia as ra
+from scrapers import rwitc, btc, hkjc, odds_import, tabnz, racingaustralia as ra
 from models.rating_engine import compute_composite_scores
 from models import parlay as parlay_engine
 from models.odds import margin_percent, overround
@@ -311,8 +312,14 @@ def get_slate(d: str, c: str) -> list[dict]:
             "class_code": row["class_code"], "distance_m": row["distance_m"],
             "circuit": c, "field_size": len(entries), "entries": entries,
             "odds": load_market_odds(conn, row["id"]),
+            "odds_age_min": odds_age_minutes(conn, row["id"]),
         })
     return slate
+
+
+# Beyond this, a stored price is old enough that the market has probably moved
+# and any edge measured against it is fiction rather than opportunity.
+STALE_ODDS_MINUTES = 90
 
 
 race_plans = get_race_plans(date_str, venue) if venue else []
@@ -883,6 +890,53 @@ with tab_odds:
             f"invisible to the parlay engine -- there is nothing to measure an edge against."
         )
 
+        if circuit == "Australia":
+            st.markdown("#### Fetch live prices automatically (NZ TAB)")
+            st.caption(
+                "NZ TAB books all the major Australian meetings and, unlike tab.com.au, "
+                "punters, racenet, Sportsbet, PointsBet and Betfair, it answers from India. "
+                "This pulls fixed win/place odds for every runner in the meetings you have "
+                "loaded -- which is also what gets a race past the 80% price-coverage guard. "
+                "**These are NZ TAB's prices, not your bookmaker's:** use them to find races "
+                "worth a look, then confirm the number where you actually bet. Anything you "
+                "paste below overrides them."
+            )
+            venues_loaded = sorted({r["venue"] for r in slate})
+            if st.button("Fetch live odds for loaded meetings", use_container_width=True):
+                try:
+                    with st.spinner("Fetching from NZ TAB..."):
+                        by_venue = tabnz.odds_for_date(date_str, venues=venues_loaded)
+                    if not by_venue:
+                        st.warning(
+                            "No live races found for these meetings. Either they have all run "
+                            "(settled races keep stale pre-scratching prices, so they're skipped "
+                            "on purpose) or the card isn't open for betting yet."
+                        )
+                    total, unmatched_total = 0, 0
+                    for tab_venue, races in by_venue.items():
+                        local = next((v for v in venues_loaded
+                                      if tabnz.venues_match(tab_venue, v)), None)
+                        if not local:
+                            continue
+                        rows = tabnz.to_market_rows(races)
+                        res = store_market_odds(conn, date_str, local, rows, source="tabnz")
+                        total += res["matched"]
+                        unmatched_total += len(res["unmatched"])
+                        st.write(f"**{local}** -- priced {res['matched']} runners "
+                                 f"across {len(races)} live race(s)")
+                    if total:
+                        st.success(f"Stored prices for {total} runners.")
+                        if unmatched_total:
+                            st.caption(
+                                f"{unmatched_total} runner name(s) didn't match the loaded field -- "
+                                f"usually late scratchings or a spelling difference between "
+                                f"Racing Australia and NZ TAB."
+                            )
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"NZ TAB fetch failed: {e}")
+            st.divider()
+
         st.markdown("#### Paste prices from your bookmaker")
         st.caption(
             "The reliable path. Copy the win (and place, if shown) prices off any screen and paste "
@@ -1004,6 +1058,18 @@ with tab_parlay:
                 f"tab -- without them there is no edge to measure and nothing to suggest."
             )
         else:
+            stale = [r for r in priced_races
+                     if (r.get("odds_age_min") or 0) > STALE_ODDS_MINUTES]
+            if stale:
+                oldest = max(r["odds_age_min"] for r in stale)
+                st.error(
+                    f"⏰ **Stale prices.** {len(stale)} of {len(priced_races)} priced races are "
+                    f"working off odds captured up to {oldest / 60:.1f} hours ago. Markets move "
+                    f"constantly, so any edge shown against those numbers may no longer exist -- "
+                    f"re-fetch or re-paste before staking anything.",
+                    icon="⚠️",
+                )
+
             card = parlay_engine.daily_parlay_card(
                 priced_races, bankroll=bankroll, model_weight=model_weight, circuit=circuit)
 

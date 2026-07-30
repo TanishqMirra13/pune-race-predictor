@@ -111,23 +111,60 @@ it will not invent a suggestion to fill the page.
 
 ## Getting odds in
 
-This is the genuinely hard part from India, and the honest state of it,
-verified from this machine in July 2026:
+Every Australian source is walled off from an Indian IP -- except one. Tested
+from this machine, July 2026:
 
 | Source | Status |
 |---|---|
-| Racing Australia results (starting prices) | works, but only *after* the race |
+| **NZ TAB affiliate API** | **works -- live fixed win/place odds, whole field** |
 | HKJC win odds and dividends | works, in season |
-| TAB.com.au public API | geo-blocked -- serves a region-unavailable page |
-| punters.com.au, racenet.com.au | 403 -- CloudFront blocks the request |
+| Racing Australia results (starting prices) | works, but only *after* the race |
+| TAB.com.au public API | geo-blocked -- region-unavailable page |
+| punters.com.au, racenet.com.au | 403 -- CloudFront |
+| Sportsbet | 403 -- Akamai "Access Denied" |
+| PointsBet | Cloudflare challenge |
+| Betfair (api, identity, AU site) | 403 at the edge |
+| Neds / Ladbrokes (Entain) | 500 from their gateway |
 
-So there is **no free, reliable, automatic source of live Australian prices**
-from here. Four paths exist instead, in descending order of convenience:
+**NZ TAB is the answer for Australian odds.** It books all the major
+Australian meetings and isn't geo-fenced the way tab.com.au is:
 
-1. **Paste them** (Odds tab). Copy prices off any screen, one runner per line.
-   Recognised shapes: `MAGIC MOMENT 3.40`, `7. Magic Moment $3.40 $1.55`,
-   `Magic Moment 5/2`. Header and junk lines are ignored. Needs no account, no
-   key, and works today.
+```
+https://api.tab.co.nz/affiliates/v1/racing/meetings?date_from=&date_to=
+https://api.tab.co.nz/affiliates/v1/racing/events/{race_id}
+```
+
+Every runner carries `fixed_win`, `fixed_place`, `pool_win`, `pool_place`,
+plus barrier, jockey, trainer, weight, form and price fluctuations. In a real
+run it priced **189 runners across 16 live races in two meetings**, taking
+price coverage from 0% to 100% and getting every race past the coverage guard.
+No key, no account, no registration.
+
+`scrapers/tabnz.py` implements it. Two traps it handles, both found the hard
+way:
+
+- **The parameter is `date_from`/`date_to`, not `date`.** A `date` parameter is
+  accepted, silently ignored, and you get a valid 200 full of real odds *for
+  the wrong day*. The endpoint echoes its parsed parameters back, so the
+  scraper asserts they match what was asked for and raises if not.
+- **Settled races keep stale, pre-scratching fixed odds.** A real Eagle Farm
+  race showed a normal 1.203 book across all ten runners but 0.906 across the
+  seven that started, because three were scratched and the price was never
+  revised. A sub-1.0 book is meaningless to de-vig, so only live races are
+  fetched.
+
+**Whose price is it, though.** These are NZ TAB's prices. If you place bets
+somewhere else, the edge that matters is measured against *that* book's price.
+Use this feed to find races worth a look and as a fair-price benchmark, then
+confirm the number where you actually bet. Prices from here are stored under
+the source `tabnz`, which deliberately ranks *below* anything you enter
+yourself, so a pasted price always wins.
+
+The other paths still exist:
+
+1. **Paste them** (Odds tab) -- overrides the automatic feed. Recognised
+   shapes: `MAGIC MOMENT 3.40`, `7. Magic Moment $3.40 $1.55`, `Magic Moment
+   5/2`. Header and junk lines are ignored.
 2. **HKJC** -- scraped automatically in season.
 3. **Racing Australia SPs** -- automatic but post-race. Useless for betting,
    essential for checking whether the model is any good.
@@ -363,10 +400,17 @@ with the winner is fixed):
 
 - **India only:** no pre-race market odds available from either site --
   staking is confidence-tiered, not true expected-value.
-- **Australia:** no automatic live prices from India (see "Getting odds in").
-  Live prices have to be pasted, so the parlay engine is only as current as
-  your last paste -- prices move, and a stale price is a fictional edge.
-  Racing Australia also publishes no jockey/trainer strike-rate leaderboard,
+- **Australia:** live prices come from NZ TAB, which is a *different book* from
+  wherever you place bets. An edge measured against NZ TAB's price is not an
+  edge at your bookmaker unless their price is as long -- always confirm before
+  staking. Prices also move, so a fetch from three hours ago is a fictional
+  edge; re-run before betting.
+- **Big fields get skipped.** The engine only models fields of 5-16, and
+  Australian country meetings routinely card 17-18 runners. On a real Port
+  Macquarie card that excluded 4 of 8 races. Raise `MAX_FIELD_SIZE` in
+  `models/parlay.py` if you want them, but be aware those races are genuinely
+  harder to forecast.
+- Racing Australia publishes no jockey/trainer strike-rate leaderboard,
   so on the AU and HK circuits those signals build up from your own archived
   results; run `python -m scripts.daily --backfill 21` before expecting the
   connections signal to mean anything.

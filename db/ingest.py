@@ -326,13 +326,18 @@ def store_market_odds(conn: sqlite3.Connection, race_date: str, venue: str,
 
 
 def load_market_odds(conn: sqlite3.Connection, race_id: int,
-                     prefer: tuple = ("manual", "api", "live", "sp")) -> dict:
+                     prefer: tuple = ("manual", "api", "live", "tabnz", "sp")) -> dict:
     """{HORSE NAME: {'win': d, 'place': d}} for one race.
 
-    Sources are tried in preference order so a price you actually pasted beats
-    a stale scrape, and a settled starting price is used only as a last
-    resort -- an SP cannot be bet, so treating it as a live quote would invent
-    an opportunity that never existed."""
+    Sources are tried in preference order, and the order encodes whose price
+    you can actually get on: 'manual' is what you saw at your own book, 'api'
+    your configured book, 'live' HKJC's official odds, 'tabnz' NZ TAB used as
+    a proxy for the Australian market, and 'sp' a settled starting price.
+    'sp' ranks last because it cannot be bet -- by the time it exists the race
+    has run -- so treating it as a live quote would invent an opportunity that
+    never existed. 'tabnz' ranks below anything you sourced yourself for the
+    same reason in miniature: it is a real price, but not necessarily one your
+    bookmaker is offering."""
     rows = conn.execute(
         """SELECT h.name, mo.market, mo.source, mo.decimal_odds
            FROM market_odds mo JOIN horses h ON h.id = mo.horse_id
@@ -351,6 +356,27 @@ def load_market_odds(conn: sqlite3.Connection, race_id: int,
     for slot in best.values():
         slot.pop("_rank", None)
     return best
+
+
+def odds_age_minutes(conn: sqlite3.Connection, race_id: int,
+                     exclude_sources: tuple = ("sp",)) -> float | None:
+    """Age in minutes of the freshest bettable price stored for a race.
+
+    Prices move constantly, and a stale one is worse than none at all: the
+    engine will happily report an edge against a number nobody is offering any
+    more, and that edge is pure fiction. Settled starting prices are excluded
+    because they have no meaningful age -- they are final by definition.
+    Returns None when no bettable price is stored."""
+    placeholders = ",".join("?" * len(exclude_sources))
+    row = conn.execute(
+        f"""SELECT (julianday('now') - julianday(MAX(captured_at))) * 24 * 60 AS age
+            FROM market_odds
+            WHERE race_id = ? AND source NOT IN ({placeholders})""",
+        (race_id, *exclude_sources),
+    ).fetchone()
+    if not row or row["age"] is None:
+        return None
+    return max(float(row["age"]), 0.0)
 
 
 # --------------------------------------------------------------------------

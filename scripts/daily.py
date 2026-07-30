@@ -18,10 +18,13 @@ Two things it deliberately will NOT do:
   "nothing qualifies", because most days nothing does. A tool that always has
   a tip is a tool that is telling you what you want to hear.
 
-Prices are the one part it cannot fetch for the Australian circuit -- TAB's
-API and the major form sites all block non-Australian traffic (verified from
-this machine). So the flow is: run this, see which races look interesting,
-paste those races' prices into the Odds tab, then re-run.
+On the Australian circuit it also fetches live fixed odds from NZ TAB, which
+is the one Australian-racing price feed that answers from India (tab.com.au,
+punters, racenet, Sportsbet, PointsBet and Betfair all block or challenge the
+request). Those are NZ TAB's prices though, not your bookmaker's -- treat them
+as a way to find races worth a look and as a fair-price benchmark, and confirm
+the number where you actually bet before staking. Pass --no-odds to skip the
+fetch and price things by hand in the app's Odds tab instead.
 """
 import argparse
 import sys
@@ -31,12 +34,18 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from db.ingest import (  # noqa: E402
-    load_market_odds, settle_parlays, store_intl_racecard, store_intl_results,
+    load_market_odds, odds_age_minutes, settle_parlays, store_intl_racecard,
+    store_intl_results,
 )
+
+# Past this, the market has probably moved and an edge measured against the
+# stored price is fiction rather than opportunity.
+STALE_ODDS_MINUTES = 90
 from db.schema import get_connection, init_db  # noqa: E402
 from models import parlay as parlay_engine  # noqa: E402
 from models.rating_engine import compute_composite_scores  # noqa: E402
-from scrapers import hkjc, racingaustralia as ra  # noqa: E402
+from db.ingest import store_market_odds  # noqa: E402
+from scrapers import hkjc, tabnz, racingaustralia as ra  # noqa: E402
 
 RULE = "=" * 78
 
@@ -88,6 +97,37 @@ def load_hong_kong(conn, date_str: str) -> list[str]:
     return loaded
 
 
+def load_odds_australia(conn, date_str: str, venues: list[str]) -> int:
+    """Pull live fixed odds from NZ TAB for the meetings we've loaded.
+
+    Only live races are fetched -- a settled race keeps its last fixed odds
+    without re-pricing for scratchings, which leaves a book summing to under 1
+    and nothing sensible to de-vig."""
+    if not venues:
+        return 0
+    try:
+        by_venue = tabnz.odds_for_date(date_str, venues=venues)
+    except Exception as exc:
+        print(f"  NZ TAB fetch failed: {exc}")
+        return 0
+    if not by_venue:
+        print("  No live races to price -- they have all run, or betting isn't open yet.")
+        return 0
+    total = 0
+    for tab_venue, races in by_venue.items():
+        local = next((v for v in venues if tabnz.venues_match(tab_venue, v)), None)
+        if not local:
+            continue
+        res = store_market_odds(conn, date_str, local, tabnz.to_market_rows(races), source="tabnz")
+        total += res["matched"]
+        print(f"    {local:<26} {res['matched']:>3} runners priced across {len(races)} live race(s)")
+        if res["unmatched"]:
+            print(f"      ({len(res['unmatched'])} name(s) unmatched -- late scratchings or spelling)")
+    print(f"  Priced {total} runners. These are NZ TAB's prices, not your bookmaker's --")
+    print("  confirm the number where you actually bet before staking.")
+    return total
+
+
 def build_slate(conn, date_str: str, circuit: str) -> list[dict]:
     rows = conn.execute(
         """SELECT id, venue, race_number, race_name, race_time_local
@@ -104,6 +144,7 @@ def build_slate(conn, date_str: str, circuit: str) -> list[dict]:
             "race_name": row["race_name"], "race_time": row["race_time_local"],
             "circuit": circuit, "field_size": len(entries), "entries": entries,
             "odds": load_market_odds(conn, row["id"]),
+            "odds_age_min": odds_age_minutes(conn, row["id"]),
         })
     return slate
 
@@ -138,6 +179,13 @@ def report_top_picks(slate: list[dict], limit: int = 8) -> None:
 
 
 def report_parlays(priced: list[dict], bankroll: float, target: float, circuit: str) -> None:
+    stale = [r for r in priced if (r.get("odds_age_min") or 0) > STALE_ODDS_MINUTES]
+    if stale:
+        oldest = max(r["odds_age_min"] for r in stale)
+        print(f"  !! STALE PRICES: {len(stale)} of {len(priced)} races are priced off odds up to")
+        print(f"     {oldest / 60:.1f} hours old. Markets move -- any edge below may no longer")
+        print(f"     exist. Re-run without --no-odds before staking anything.\n")
+
     card = parlay_engine.daily_parlay_card(priced, bankroll=bankroll, circuit=circuit)
     print(f"\n  {card['verdict']}\n")
 
@@ -257,6 +305,8 @@ def main() -> None:
     ap.add_argument("--results", metavar="DATE", help="Fetch results/SPs for a date and exit")
     ap.add_argument("--backfill", type=int, metavar="DAYS", help="Archive N days of past results and exit")
     ap.add_argument("--no-load", action="store_true", help="Use what's already in the DB")
+    ap.add_argument("--no-odds", action="store_true",
+                    help="Skip the NZ TAB odds fetch (Australia only)")
     args = ap.parse_args()
 
     init_db()
@@ -282,12 +332,20 @@ def main() -> None:
     do_settle(conn, yesterday)
 
     _h("2. Loading today's fields")
+    loaded_venues: list[str] = []
     if args.no_load:
         print("  --no-load: using what is already stored.")
+        loaded_venues = [r["venue"] for r in conn.execute(
+            "SELECT DISTINCT venue FROM races WHERE race_date=? AND circuit=?",
+            (args.date, args.circuit))]
     elif args.circuit == "Australia":
-        load_australia(conn, args.date, args.states, args.max_meetings)
+        loaded_venues = load_australia(conn, args.date, args.states, args.max_meetings)
     else:
-        load_hong_kong(conn, args.date)
+        loaded_venues = load_hong_kong(conn, args.date)
+
+    if args.circuit == "Australia" and loaded_venues and not args.no_odds:
+        _h("2b. Fetching live odds (NZ TAB)")
+        load_odds_australia(conn, args.date, loaded_venues)
 
     slate = build_slate(conn, args.date, args.circuit)
     if not slate:
