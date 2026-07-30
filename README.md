@@ -171,6 +171,59 @@ The other paths still exist:
 4. **An API you already have access to** -- a generic adapter configured
    entirely by environment variables.
 
+## Placing the bets
+
+The gap between "this is value" and "bet placed" is where automated betting
+usually loses money: the edge is measured at one book's price and the bet goes
+on at another book's price. If the second is shorter, the edge is gone — and an
+automated system keeps placing anyway, every day.
+
+So every bet on the slip carries a **minimum acceptable price**, and nothing is
+placed below it. A selection we make a 20% chance is worth 5.50 and not worth
+4.60; the floor is 5.15 (a 3% edge), and at 4.60 the bet simply does not
+happen. A skipped bet costs nothing. A bet at the wrong price costs money every
+time.
+
+The Daily Parlays tab prints the slip: selection, stake, the price the edge was
+found at, and the floor. Take it to your bookmaker, check the price, bet only
+the rows that still qualify. There's a price-checker in the same tab that gives
+a go/no-go on whatever number you're being shown.
+
+Demonstrated with a book pricing 15% shorter across the board than where the
+edges were found:
+
+```
+placed=0 skipped=3 staked=Rs0
+  SKIP GATWICK: price 4.67 is below the 5.15 floor (9% short) -- at this book the edge is gone
+  SKIP MISS BUSSLINGER: price 2.72 is below the 3.03 floor (10% short)
+  SKIP RUN HARRY RUN: price 6.80 is below the 7.36 floor (8% short)
+```
+
+That is the system working. Those three bets would each have been losers at
+those prices.
+
+### Automated placement
+
+`scrapers/bookmaker.py` has a provider-neutral adapter. `DryRunAdapter` is the
+default: it runs the full flow, validates every bet, places nothing. Real
+placement needs **four** switches — `allow_real_bets=True` in code, plus
+`BET_API_ENABLED=true`, `BET_API_URL` and `BET_API_TOKEN` in `.env` — so
+neither a stray default nor a copied `.env` can start moving money.
+
+**Stake will not work for this.** Both `stake.com` and the `stake1021.com`
+mirror return Cloudflare's bot challenge (`cf-mitigated: challenge`) to every
+programmatic request, verified July 2026 — `stake.com` is also ISP-blocked from
+Indian connections outright. Getting past a bot challenge needs a browser
+fingerprint Cloudflare actively works to detect; this project does not do that.
+The adapter recognises a Cloudflare block and says so rather than retrying.
+Place manually from the bet slip instead.
+
+If you want genuinely automated placement, you need a bookmaker that *sanctions*
+it. Betfair's exchange API is the standard choice — it's documented, permitted,
+and the exchange has near-zero overround versus a bookmaker's 16%, so it's the
+better price as well as the automatable one. It also 403s from an Indian IP, and
+Betfair AU may not accept Indian residents, so check before building on it.
+
 ### If you have a bookmaker API key
 
 **Do not paste an API key into a chat window, a source file, or anything that

@@ -15,6 +15,9 @@ from db.ingest import (
 from scrapers import rwitc, btc, hkjc, odds_import, tabnz, racingaustralia as ra
 from models.rating_engine import compute_composite_scores
 from models import parlay as parlay_engine
+from models.betslip import (
+    DEFAULT_MIN_EDGE_AT_PLACEMENT, build_slip, validate_against_live,
+)
 from models.odds import margin_percent, overround
 from models.staking import (
     build_win_place_plan, harville_forecast_probabilities, jackpot_leg_plan, stop_rules,
@@ -1143,6 +1146,47 @@ with tab_parlay:
                                         stake=pl["suggested_stake"], placed=False,
                                         notes=prof["label"])
                             st.success("Saved -- settle it in the Followup tab once the races have run.")
+
+            if card["singles"]:
+                st.divider()
+                st.markdown("#### 🎫 Bet slip -- what to place, and the price to refuse below")
+                st.caption(
+                    "The edge below was measured at the price in the **Found at** column. If the "
+                    "book you actually bet with is showing less than **Min price**, the edge does "
+                    "not exist there -- skip it. Nothing is lost by skipping; the loss comes from "
+                    "placing anyway. Take this to your bookmaker, check the price, and only bet "
+                    "the rows that still qualify."
+                )
+                slip = build_slip(card["singles"], bankroll)
+                st.dataframe(
+                    [{"Race": f"{b.venue} R{b.race_no}", "Selection": b.horse_name,
+                      "Bet": b.market, "Stake (Rs)": b.stake,
+                      "Found at": b.reference_odds,
+                      "Min price": b.min_acceptable_odds,
+                      "Our chance": f"{b.probability * 100:.0f}%",
+                      "Edge if you get it": f"{b.expected_value_at_reference * 100:+.1f}%"}
+                     for b in slip],
+                    use_container_width=True, hide_index=True,
+                )
+                st.caption(
+                    f"Total if every row qualifies: Rs{sum(b.stake for b in slip):.0f}. "
+                    f"**Min price** is the shortest odds at which the bet still clears a "
+                    f"{DEFAULT_MIN_EDGE_AT_PLACEMENT * 100:.0f}% edge -- below it you are paying "
+                    f"the bookmaker for the privilege of being right."
+                )
+                with st.expander("Check a price before you bet"):
+                    st.caption(
+                        "Type what your bookmaker is showing and this says go or no-go, "
+                        "including whether the price has moved so far that the market probably "
+                        "knows something the model doesn't."
+                    )
+                    names = {f"{b.venue} R{b.race_no} -- {b.horse_name} ({b.market})": b for b in slip}
+                    which = st.selectbox("Bet", list(names), key="slip_check")
+                    offered = st.number_input("Price your bookmaker is showing", min_value=1.0,
+                                              value=float(names[which].min_acceptable_odds),
+                                              step=0.05, key="slip_price")
+                    verdict = validate_against_live(names[which], offered)
+                    (st.success if verdict["place"] else st.error)(verdict["reason"])
 
             if card["rejected_races"]:
                 with st.expander(f"{len(card['rejected_races'])} race(s) produced no value selection"):
