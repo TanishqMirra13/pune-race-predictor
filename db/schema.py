@@ -115,6 +115,60 @@ CREATE TABLE IF NOT EXISTS ratings_history (
     source TEXT
 );
 
+-- Market prices, one row per (race, horse, market, source). Unlike the Indian
+-- clubs -- which publish no pre-race odds at all -- Racing Australia prints a
+-- starting price for every runner and HKJC publishes live win odds, so for
+-- the AU/HK circuits we finally have a market to price ourselves against.
+-- 'source' distinguishes a live bookmaker board from a settled starting
+-- price, because only the former is bettable and only the latter is honest
+-- for backtesting.
+CREATE TABLE IF NOT EXISTS market_odds (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    race_id INTEGER NOT NULL REFERENCES races(id),
+    horse_id INTEGER NOT NULL REFERENCES horses(id),
+    market TEXT NOT NULL CHECK(market IN ('win', 'place')),
+    source TEXT NOT NULL,
+    decimal_odds REAL NOT NULL,
+    captured_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(race_id, horse_id, market, source)
+);
+
+-- A suggested (and possibly placed) multi/parlay. Stored whole so the daily
+-- followup can settle it leg by leg and the calibration view can compare the
+-- hit rate we predicted against the hit rate we got.
+CREATE TABLE IF NOT EXISTS parlays (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    race_date TEXT NOT NULL,
+    circuit TEXT,
+    label TEXT,
+    kind TEXT,
+    stake REAL,
+    combined_odds REAL,
+    hit_probability REAL,
+    expected_value REAL,
+    status TEXT DEFAULT 'pending',
+    payout REAL,
+    placed INTEGER DEFAULT 0,
+    notes TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS parlay_legs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    parlay_id INTEGER NOT NULL REFERENCES parlays(id) ON DELETE CASCADE,
+    leg_no INTEGER,
+    race_id INTEGER REFERENCES races(id),
+    venue TEXT,
+    race_no INTEGER,
+    horse_name TEXT NOT NULL,
+    market TEXT NOT NULL,
+    decimal_odds REAL,
+    model_probability REAL,
+    market_probability REAL,
+    blended_probability REAL,
+    outcome TEXT DEFAULT 'pending'
+);
+
 CREATE TABLE IF NOT EXISTS bankroll_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     race_date TEXT NOT NULL,
@@ -169,6 +223,28 @@ def _migrate(conn: sqlite3.Connection) -> None:
     race_cols = {row["name"] for row in conn.execute("PRAGMA table_info(races)")}
     if "tote_favourite" not in race_cols:
         conn.execute("ALTER TABLE races ADD COLUMN tote_favourite TEXT")
+    # Added when the Australian and Hong Kong circuits were wired in. 'circuit'
+    # is the coarse grouping the app filters on (India / Australia / Hong Kong)
+    # while 'venue' stays the individual track, so a Pune card and a Rosehill
+    # card can coexist in one table without either query seeing the other.
+    for col, decl in (
+        ("circuit", "TEXT"),
+        ("country", "TEXT"),
+        ("race_time_local", "TEXT"),
+        ("track_condition", "TEXT"),
+        ("source_key", "TEXT"),
+    ):
+        if col not in race_cols:
+            conn.execute(f"ALTER TABLE races ADD COLUMN {col} {decl}")
+    conn.execute("UPDATE races SET circuit='India' WHERE circuit IS NULL")
+
+    if "barrier" not in run_cols:
+        conn.execute("ALTER TABLE runs ADD COLUMN barrier INTEGER")
+    if "saddlecloth" not in run_cols:
+        conn.execute("ALTER TABLE runs ADD COLUMN saddlecloth INTEGER")
+
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_races_date_circuit ON races(race_date, circuit)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_market_odds_race ON market_odds(race_id, market)")
 
 
 if __name__ == "__main__":

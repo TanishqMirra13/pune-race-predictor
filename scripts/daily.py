@@ -1,0 +1,314 @@
+"""The daily routine, as one command.
+
+    python -m scripts.daily                     # today's Australian slate
+    python -m scripts.daily --date 2026-08-01 --states NSW VIC
+    python -m scripts.daily --circuit "Hong Kong"
+    python -m scripts.daily --settle 2026-07-30 # grade yesterday's slips
+    python -m scripts.daily --backfill 14       # archive the last 14 days of results
+
+Run it in the morning and it will: settle yesterday, load today's fields, tell
+you which races have prices, and print any multi that survives the
+expected-value test. Run it in the evening with --settle to find out whether
+the day actually made money.
+
+Two things it deliberately will NOT do:
+
+- It will not place a bet. Nothing in this project talks to a bookmaker.
+- It will not invent a suggestion to fill the page. Most days it will print
+  "nothing qualifies", because most days nothing does. A tool that always has
+  a tip is a tool that is telling you what you want to hear.
+
+Prices are the one part it cannot fetch for the Australian circuit -- TAB's
+API and the major form sites all block non-Australian traffic (verified from
+this machine). So the flow is: run this, see which races look interesting,
+paste those races' prices into the Odds tab, then re-run.
+"""
+import argparse
+import sys
+from datetime import date, timedelta
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from db.ingest import (  # noqa: E402
+    load_market_odds, settle_parlays, store_intl_racecard, store_intl_results,
+)
+from db.schema import get_connection, init_db  # noqa: E402
+from models import parlay as parlay_engine  # noqa: E402
+from models.rating_engine import compute_composite_scores  # noqa: E402
+from scrapers import hkjc, racingaustralia as ra  # noqa: E402
+
+RULE = "=" * 78
+
+
+def _h(title: str) -> None:
+    print(f"\n{RULE}\n{title}\n{RULE}")
+
+
+# --------------------------------------------------------------------------
+
+def load_australia(conn, date_str: str, states: list[str], max_meetings: int) -> list[str]:
+    meetings = ra.meetings_for_date(date_str, states, use_cache=False)
+    if not meetings:
+        print(f"  No Australian meetings found for {date_str} in {', '.join(states)}.")
+        return []
+    print(f"  {len(meetings)} meeting(s) found; loading up to {max_meetings}.")
+    loaded = []
+    for m in meetings[:max_meetings]:
+        try:
+            races = ra.parse_racecard(ra.fetch_form_html(m["key"], use_cache=True))
+            n = store_intl_racecard(conn, date_str, m["venue"], "Australia", races,
+                                    country="AU", source_key=m["key"])
+            print(f"    {m['state']:4s} {m['venue']:<26} {len(races):>2} races, {n:>3} runners")
+            loaded.append(m["venue"])
+        except Exception as exc:
+            print(f"    {m['state']:4s} {m['venue']:<26} FAILED: {exc}")
+    return loaded
+
+
+def load_hong_kong(conn, date_str: str) -> list[str]:
+    season = hkjc.season_status()
+    if not season["in_season"]:
+        print(f"  {season['message']}")
+        return []
+    loaded = []
+    for code, name in hkjc.RACECOURSES.items():
+        try:
+            races = hkjc.fetch_meeting_card(date_str, code, use_cache=True)
+        except Exception as exc:
+            print(f"    {name}: fetch failed: {exc}")
+            continue
+        if not races:
+            continue
+        n = store_intl_racecard(conn, date_str, name, "Hong Kong", races, country="HK")
+        print(f"    {name:<16} {len(races)} races, {n} runners")
+        loaded.append(name)
+    if not loaded:
+        print("  No Hong Kong card published for that date.")
+    return loaded
+
+
+def build_slate(conn, date_str: str, circuit: str) -> list[dict]:
+    rows = conn.execute(
+        """SELECT id, venue, race_number, race_name, race_time_local
+           FROM races WHERE race_date=? AND circuit=? ORDER BY venue, race_number""",
+        (date_str, circuit),
+    ).fetchall()
+    slate = []
+    for row in rows:
+        entries = compute_composite_scores(conn, row["id"])
+        if not entries:
+            continue
+        slate.append({
+            "race_id": row["id"], "venue": row["venue"], "race_no": row["race_number"],
+            "race_name": row["race_name"], "race_time": row["race_time_local"],
+            "circuit": circuit, "field_size": len(entries), "entries": entries,
+            "odds": load_market_odds(conn, row["id"]),
+        })
+    return slate
+
+
+def report_slate(slate: list[dict]) -> list[dict]:
+    priced = [r for r in slate if r["odds"]]
+    print(f"  {len(slate)} races loaded, {len(priced)} with prices attached.")
+    if not priced:
+        print("\n  Nothing can be evaluated without prices. Open the app's Odds tab, paste the")
+        print("  win/place prices for the races you care about, then run this again.")
+    unpriced = [r for r in slate if not r["odds"]]
+    if unpriced and priced:
+        print(f"  ({len(unpriced)} race(s) still unpriced and therefore invisible to the engine.)")
+    return priced
+
+
+def report_top_picks(slate: list[dict], limit: int = 8) -> None:
+    """Model opinion only -- no prices needed. Useful for deciding which races
+    are worth going and getting a price for."""
+    ranked = []
+    for race in slate:
+        top = race["entries"][0]
+        ranked.append((top["win_probability"], race, top))
+    ranked.sort(key=lambda t: t[0], reverse=True)
+    print("  Strongest model opinions on the card (go price these up first):")
+    for prob, race, top in ranked[:limit]:
+        marker = "$" if race["odds"] else " "
+        print(f"   {marker} {race['venue'][:18]:<18} R{race['race_no']:<2} "
+              f"{top['horse_name'][:22]:<22} {prob * 100:5.1f}%  "
+              f"(field {race['field_size']})")
+    print("   '$' means prices are already stored for that race.")
+
+
+def report_parlays(priced: list[dict], bankroll: float, target: float, circuit: str) -> None:
+    card = parlay_engine.daily_parlay_card(priced, bankroll=bankroll, circuit=circuit)
+    print(f"\n  {card['verdict']}\n")
+
+    if card["singles"]:
+        print("  SINGLES (same edge as a multi leg, far less variance):")
+        for s in card["singles"]:
+            print(f"    {s['venue'][:16]:<16} R{s['race_no']:<2} {s['horse_name'][:20]:<20} "
+                  f"{s['market']:<5} @{s['decimal_odds']:<6} fair {s['fair_odds']:<6} "
+                  f"edge {s['expected_value'] * 100:+5.1f}%  stake Rs{s['suggested_stake']:.0f}")
+
+    for prof in card["profiles"].values():
+        print(f"\n  {prof['label'].upper()}")
+        if not prof["parlays"]:
+            print("    nothing clears this profile's bar today")
+            continue
+        for pl in prof["parlays"]:
+            print("    " + " + ".join(
+                f"{l['horse_name']}({l['venue'][:10]} R{l['race_no']} {l['market']} @{l['decimal_odds']})"
+                for l in pl["legs"]))
+            print(f"      odds {pl['combined_odds']:.2f} (fair {pl['fair_combined_odds']:.2f}) | "
+                  f"lands {pl['hit_probability'] * 100:.0f}% | edge {pl['expected_value'] * 100:+.1f}% | "
+                  f"margin given up {pl['margin_drag'] * 100:.0f}%")
+            print(f"      Kelly stake Rs{pl['suggested_stake']:.0f} -> "
+                  f"Rs{pl['potential_profit']:.0f} if it lands")
+            feas = parlay_engine.target_feasibility(pl, target, bankroll)
+            if feas.get("achievable"):
+                flag = "ABOVE KELLY" if feas.get("exceeds_kelly") else "within Kelly"
+                print(f"      for Rs{target:.0f}: stake Rs{feas['required_stake']:.0f} ({flag}); "
+                      f"{feas['probability_of_hitting'] * 100:.0f}% chance, "
+                      f"EV Rs{feas['expected_pnl_at_that_stake']:+.0f}/day")
+
+    if card["rejected_races"]:
+        print(f"\n  {len(card['rejected_races'])} race(s) offered no value:")
+        for r in card["rejected_races"][:10]:
+            print(f"    {r['race']}: {r['reason']}")
+
+
+def do_settle(conn, date_str: str) -> None:
+    res = settle_parlays(conn, date_str)
+    if not res["settled"] and not res["pending"]:
+        print("  No saved parlays for that date.")
+        return
+    print(f"  Settled {res['settled']} slip(s): {res['won']} won, {res['lost']} lost, "
+          f"{res['pending']} still pending.")
+    if res["settled"]:
+        print(f"  Staked Rs{res['staked']:.0f}, returned Rs{res['returned']:.0f} "
+              f"-> P&L Rs{res['pnl']:+.0f}")
+    if res["pending"]:
+        print("  Pending slips are waiting on results. Load those meetings' results first:")
+        print("    python -m scripts.daily --results " + date_str)
+
+    lifetime = conn.execute(
+        "SELECT COUNT(*) n, SUM(stake) staked, SUM(COALESCE(payout,0)) ret "
+        "FROM parlays WHERE status IN ('won','lost')"
+    ).fetchone()
+    if lifetime and lifetime["n"]:
+        staked, ret = lifetime["staked"] or 0, lifetime["ret"] or 0
+        roi = ((ret / staked - 1) * 100) if staked else 0
+        print(f"\n  Lifetime: {lifetime['n']} settled slips, staked Rs{staked:.0f}, "
+              f"returned Rs{ret:.0f}, P&L Rs{ret - staked:+.0f} ({roi:+.1f}% ROI)")
+        if lifetime["n"] < 30:
+            print("  (Under 30 slips this number is noise, not a verdict.)")
+
+
+def do_results(conn, date_str: str, states: list[str], circuit: str) -> None:
+    """Pull results (and therefore starting prices) for a date."""
+    total = 0
+    if circuit == "Australia":
+        for m in ra.meetings_for_date(date_str, states, results_calendar=True, use_cache=False):
+            try:
+                races = ra.parse_raceresult(ra.fetch_results_html(m["key"], use_cache=False))
+                n = store_intl_results(conn, date_str, m["venue"], "Australia", races, country="AU")
+                if n:
+                    print(f"    {m['venue']:<26} {n} runners")
+                total += n
+            except Exception as exc:
+                print(f"    {m['venue']:<26} FAILED: {exc}")
+    else:
+        for code, name in hkjc.RACECOURSES.items():
+            try:
+                races = hkjc.fetch_meeting_results(date_str, code, use_cache=False)
+            except Exception as exc:
+                print(f"    {name}: {exc}")
+                continue
+            if races:
+                n = store_intl_results(conn, date_str, name, "Hong Kong", races, country="HK")
+                print(f"    {name:<26} {n} runners across {len(races)} races")
+                total += n
+    print(f"  Stored {total} result rows (starting prices included).")
+
+
+def do_backfill(conn, days: int, states: list[str], circuit: str) -> None:
+    """Archive recent results so the connections signal and the backtest have
+    something to work with. The model's jockey/trainer/owner strike rates on
+    the AU and HK circuits come entirely from this archive -- there is no
+    published leaderboard to scrape -- so a fresh install needs a few weeks of
+    this before those signals mean anything."""
+    today = date.today()
+    for i in range(1, days + 1):
+        d = (today - timedelta(days=i)).strftime("%Y-%m-%d")
+        print(f"  {d}")
+        do_results(conn, d, states, circuit)
+
+
+# --------------------------------------------------------------------------
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="Daily racing routine")
+    ap.add_argument("--date", default=date.today().strftime("%Y-%m-%d"))
+    ap.add_argument("--circuit", default="Australia", choices=["Australia", "Hong Kong"])
+    ap.add_argument("--states", nargs="*", default=["NSW", "VIC"],
+                    help="Australian states to scan (default NSW VIC)")
+    ap.add_argument("--max-meetings", type=int, default=4)
+    ap.add_argument("--bankroll", type=float, default=10000.0)
+    ap.add_argument("--target", type=float, default=750.0, help="Daily profit target in Rs")
+    ap.add_argument("--settle", metavar="DATE", help="Grade saved parlays for a date and exit")
+    ap.add_argument("--results", metavar="DATE", help="Fetch results/SPs for a date and exit")
+    ap.add_argument("--backfill", type=int, metavar="DAYS", help="Archive N days of past results and exit")
+    ap.add_argument("--no-load", action="store_true", help="Use what's already in the DB")
+    args = ap.parse_args()
+
+    init_db()
+    conn = get_connection()
+
+    if args.settle:
+        _h(f"SETTLING {args.settle}")
+        do_settle(conn, args.settle)
+        return
+    if args.results:
+        _h(f"RESULTS {args.results} ({args.circuit})")
+        do_results(conn, args.results, args.states, args.circuit)
+        return
+    if args.backfill:
+        _h(f"BACKFILLING {args.backfill} DAYS ({args.circuit})")
+        do_backfill(conn, args.backfill, args.states, args.circuit)
+        return
+
+    _h(f"{args.circuit.upper()} -- {args.date}")
+
+    yesterday = (date.fromisoformat(args.date) - timedelta(days=1)).strftime("%Y-%m-%d")
+    _h(f"1. Settling yesterday ({yesterday})")
+    do_settle(conn, yesterday)
+
+    _h("2. Loading today's fields")
+    if args.no_load:
+        print("  --no-load: using what is already stored.")
+    elif args.circuit == "Australia":
+        load_australia(conn, args.date, args.states, args.max_meetings)
+    else:
+        load_hong_kong(conn, args.date)
+
+    slate = build_slate(conn, args.date, args.circuit)
+    if not slate:
+        print("\n  Nothing loaded for this date -- no card published, or the meeting is over.")
+        return
+
+    _h("3. The card")
+    priced = report_slate(slate)
+    report_top_picks(slate)
+
+    _h("4. Today's suggestions")
+    if priced:
+        report_parlays(priced, args.bankroll, args.target, args.circuit)
+    else:
+        print("  Skipped -- no prices. See above.")
+
+    print(f"\n{RULE}")
+    print("Reminder: this is analysis, not advice, and nothing here places a bet.")
+    print("Settle tonight with:  python -m scripts.daily --settle " + args.date)
+    print(RULE)
+
+
+if __name__ == "__main__":
+    main()

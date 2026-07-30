@@ -21,6 +21,13 @@ docs/
 # Streamlit local secrets (never commit real secrets)
 .streamlit/secrets.toml
 
+# Bookmaker/odds API credentials. scrapers/odds_import.py reads the token from
+# here and nowhere else, so this MUST stay ignored -- committing it would push
+# a live betting-account key to the remote.
+.env
+.env.*
+!.env.example
+
 # OS junk
 .DS_Store
 Thumbs.db

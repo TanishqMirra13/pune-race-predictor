@@ -1,11 +1,73 @@
-# Pune Race Predictor
+# Race Predictor -- India / Australia / Hong Kong
 
-A local tool for entertainment analysis of Indian horse racing -- Pune,
-Mumbai (both RWITC), and Bangalore (BTC): enter a day's budget and goal, get
-a ranked, reasoned shortlist per race and a staking plan that respects that
-budget. **Not a winner-picker** -- horse racing is genuinely unpredictable.
-See the Bankroll & Calibration tab for an honest, ongoing record of how the
-model's confidence has actually tracked outcomes.
+A local tool for entertainment analysis of horse racing across three circuits:
+India (Pune and Mumbai via RWITC, Bangalore via BTC), Australia (Racing
+Australia), and Hong Kong (HKJC). Enter a day's budget and goal, get a ranked,
+reasoned shortlist per race and a staking plan that respects that budget.
+**Not a winner-picker** -- horse racing is genuinely unpredictable. See the
+Bankroll & Calibration tab for an honest, ongoing record of how the model's
+confidence has actually tracked outcomes.
+
+The three circuits are not equivalent, and the difference decides what the
+tool can honestly do on each:
+
+| | Fields & form | Official rating | Pre-race odds | EV & parlays |
+|---|---|---|---|---|
+| **India** | yes | yes | **no** | no |
+| **Australia** | yes | yes | manual paste | yes |
+| **Hong Kong** | in season | yes | yes (live) | yes |
+
+The Indian clubs publish no pre-race odds at all -- prices appear only after
+the race, on the results page. Without a market price there is nothing to
+measure an edge against, so the India circuit gets ranked picks and a staking
+plan but no expected value and no parlays. That is a limitation of the data,
+not of the model.
+
+## Read this before betting a parlay
+
+A multi is the worst-priced product on any board, and the reason is
+arithmetic, not opinion. Every leg is priced with the bookmaker's margin
+already inside it, and combining legs multiplies those margins:
+
+- Three legs into a typical 16% Australian book = betting into a **36%**
+  margin.
+- A three-leg Hong Kong all-up gives up about **44%** to tote takeout before
+  anyone has an opinion about a horse.
+
+No staking plan, bankroll rule or selection method overcomes a 36% head start.
+There is exactly one condition under which a multi is worth placing, and
+`models/parlay.py` enforces it: **every single leg must be independently +EV**,
+meaning the price on offer is longer than our best estimate of that runner's
+true chance. Then multiplying the legs multiplies an edge instead of a deficit.
+
+Consequences that are features, not bugs:
+
+- **Most days produce no qualifying multi.** An empty result means the market
+  was efficient, which is a market's normal state. The tool says so rather
+  than manufacturing a tip.
+- **Singles are listed above multis.** A single on a value selection has the
+  same edge as that leg inside a multi with a fraction of the variance. If the
+  goal is a small regular return, the singles table is the honest answer.
+- **Two runners from the same race are never combined.** They are not
+  independent -- they cannot both win -- so multiplying their probabilities
+  overstates the multi's real chance. Same-race combinations belong in the
+  Forecast/Quinella planner, which prices them properly.
+
+### On daily profit targets
+
+Wanting a fixed return per day is the most common way a betting plan fails,
+because the target is fixed and the results are not. The Daily Parlays tab
+answers the question directly for whatever target you enter: the stake it
+would take, the probability it lands, and the expected P&L at that stake. When
+the required stake exceeds the Kelly stake it says so, because past that point
+you are growing risk faster than return.
+
+A worked example the tool will print for you: a multi paying 6.13 that lands
+19% of the time needs a Rs146 stake to clear Rs750 -- and loses that stake on
+81% of days. Even with a genuine +5% edge, the honest expectation is a few
+hundred rupees a month with a losing run of a fortnight inside it, not
+Rs500-1000 banked daily. The edge is real or it isn't; the *schedule* is
+never under your control.
 
 ## Run it
 
@@ -14,10 +76,90 @@ venv\Scripts\activate
 streamlit run app.py
 ```
 
-Opens at http://localhost:8501. Use the sidebar to pick a race date/venue
-(Pune, Mumbai, or Bangalore) and click **Fetch live** to pull that day's race
-card. Off-season or if the site is unreachable, use **Manual paste fallback**
-with the saved HTML source of the race card page.
+Opens at http://localhost:8501. Pick a **circuit** in the sidebar first, then a
+date:
+
+- **India** -- pick a venue and click **Fetch live**. Off-season or if the site
+  is unreachable, use **Manual paste fallback** with the saved HTML source.
+- **Australia** -- pick states, click **Find meetings**, tick the ones you want
+  and **Load fields**. Racing happens somewhere every day of the year, usually
+  at 5-10 tracks at once, so load only what you'll actually look at.
+- **Hong Kong** -- pick the racecourse and click **Load card**. In season
+  (September to mid-July) this also pulls live win odds automatically.
+
+## The daily routine
+
+Everything the app does is also available as one command, which is the way to
+run it day to day:
+
+```
+python -m scripts.daily                             # today's Australian slate
+python -m scripts.daily --date 2026-08-01 --states NSW VIC
+python -m scripts.daily --circuit "Hong Kong"
+python -m scripts.daily --settle 2026-07-30         # grade yesterday's slips
+python -m scripts.daily --results 2026-07-30        # pull results + starting prices
+python -m scripts.daily --backfill 21               # archive 3 weeks of results
+```
+
+Morning: it settles yesterday, loads today's fields, ranks the strongest model
+opinions so you know which races are worth pricing up, and prints any multi
+that survives the EV test. Evening: `--settle` tells you whether the day made
+money.
+
+It will not place a bet -- nothing in this project talks to a bookmaker -- and
+it will not invent a suggestion to fill the page.
+
+## Getting odds in
+
+This is the genuinely hard part from India, and the honest state of it,
+verified from this machine in July 2026:
+
+| Source | Status |
+|---|---|
+| Racing Australia results (starting prices) | works, but only *after* the race |
+| HKJC win odds and dividends | works, in season |
+| TAB.com.au public API | geo-blocked -- serves a region-unavailable page |
+| punters.com.au, racenet.com.au | 403 -- CloudFront blocks the request |
+
+So there is **no free, reliable, automatic source of live Australian prices**
+from here. Four paths exist instead, in descending order of convenience:
+
+1. **Paste them** (Odds tab). Copy prices off any screen, one runner per line.
+   Recognised shapes: `MAGIC MOMENT 3.40`, `7. Magic Moment $3.40 $1.55`,
+   `Magic Moment 5/2`. Header and junk lines are ignored. Needs no account, no
+   key, and works today.
+2. **HKJC** -- scraped automatically in season.
+3. **Racing Australia SPs** -- automatic but post-race. Useless for betting,
+   essential for checking whether the model is any good.
+4. **An API you already have access to** -- a generic adapter configured
+   entirely by environment variables.
+
+### If you have a bookmaker API key
+
+**Do not paste an API key into a chat window, a source file, or anything that
+gets committed.** Put it in a `.env` file in the project root -- `.gitignore`
+already covers it -- and the app reads it from there:
+
+```
+ODDS_API_URL=https://.../races/{race}/odds
+ODDS_API_TOKEN=your-key-here
+ODDS_API_TOKEN_HEADER=x-access-token
+ODDS_API_RUNNER_PATH=data.race.runners
+ODDS_API_NAME_FIELD=name
+ODDS_API_WIN_FIELD=winOdds
+ODDS_API_PLACE_FIELD=placeOdds
+```
+
+The adapter is deliberately book-agnostic rather than hard-coded to one
+provider's schema, since those change without notice. The Odds tab shows
+whether it's configured without ever displaying the key.
+
+**Prices for a race must cover at least 80% of the field** (90% for place
+bets), or the engine refuses the race. This is not fussiness. De-vigging works
+by scaling implied probabilities to sum to 1; do that to a subset and you
+don't remove a margin, you invent one, and every priced runner looks like
+enormous value. A live run with 3 of 14 runners priced reported a *220% edge*
+before this guard existed.
 
 ## Bulk historical backfill
 
@@ -57,6 +199,77 @@ racing itself doesn't resume live until November 2026.
   2011-dated file (the most recent RWITC has published at a stable URL);
   treat as a rough reference until replaced by empirically-derived pars from
   our own results archive.
+- **Australia (Racing Australia)** -- `scrapers/racingaustralia.py`.
+  `/FreeFields/Calendar.aspx?State=NSW` for the fixture list,
+  `/FreeFields/Form.aspx?Key=2026Aug01,NSW,Rosehill Gardens` for fields plus
+  full per-horse form, `/FreeFields/Results.aspx?Key=...` for the finishing
+  order and every runner's decimal starting price. Chosen over the tipping and
+  odds sites because it's the national industry body (nothing sits between it
+  and the stewards), it's free, and it's the only one that answers from India.
+  It gives us three things the Indian clubs never did: an official handicap
+  rating for nearly every runner, a 10-run form string, and a real market
+  price.
+
+  One gotcha, verified rather than assumed: **Racing Australia's "Last 10"
+  reads oldest-first**, left to right -- the opposite of RWITC. Confirmed by
+  matching HELLOVA NATURE's `90x0321121` against its dated run list, where the
+  trailing `21121` lines up with its Apr-Jul placings 2,1,1,2,1. The rating
+  engine weights the *first* entry heaviest, so the parser reverses the string
+  on the way in. Getting this backwards would have silently inverted the form
+  signal on every Australian runner.
+- **Hong Kong (HKJC)** -- `scrapers/hkjc.py`.
+  `/racing/information/English/Racing/LocalResults.aspx?RaceDate=YYYY/MM/DD&Racecourse=HV&RaceNo=N`
+  for results and `RaceCard.aspx` for the card. The best-documented racing
+  jurisdiction anywhere for this purpose: a closed pool of about 1,200 rated
+  horses, two courses, and the club publishes finishing times, sectional
+  running positions, every runner's win odds and the full dividend table for
+  every pool.
+
+  Two structural facts the code depends on: **dividends are quoted per HK$10
+  stake**, not per HK$1 (a WIN dividend of 111.00 is a decimal price of 11.1),
+  handled in one place by `dividend_to_decimal()`; and **the season runs
+  September to mid-July**, so between mid-July and September there is no
+  Hong Kong racing at all -- not a reduced card, none. `season_status()` exists
+  so the app can tell "no card published" apart from "the scraper broke".
+
+  The results parser is verified against real meetings. The **race-card parser
+  is provisional**: HKJC withdraws a card once its meeting has run, and the
+  season was already over when it was written, so it matches the club's
+  published layout but has not been run against a live card. It fails soft
+  (returns nothing rather than raising). Verify it on the first meeting of the
+  new season before trusting a number that comes out of it.
+
+## Odds maths (`models/odds.py`)
+
+Three ideas everything on the AU/HK circuits rests on:
+
+1. **A book doesn't sum to 100%.** It sums to more, and the excess is the
+   margin. Measured on real data: an Australian country SP book came to 1.210
+   (a 17.4% bite), and a Happy Valley win pool to 1.221 -- against HKJC's
+   *published* 17.5% takeout, which is a useful independent check that both the
+   parser and the maths are right.
+2. **Stripping the margin proportionally is wrong.** Racing markets show a
+   persistent favourite-longshot bias: longshots are systematically overbet.
+   Proportional de-vigging assumes the margin is spread evenly and so flatters
+   longshots -- exactly where a naive model wants to bet. The **power method**
+   (solve for *k* such that the implied probabilities raised to *k* sum to 1)
+   shrinks long prices more than short ones. On that real Australian race it
+   moved the favourite 38.4% -> 41.8% and the 71.00 outsider 1.2% -> 0.8%.
+3. **The market is a strong opponent.** This project's own backtest found that
+   when the model's pick and the tote favourite disagreed, *the favourite won
+   more often*. So the model/market blend defaults to only **0.35** weight on
+   our own model. Raising it makes the engine bolder and, on the evidence,
+   worse. The slider in the Daily Parlays tab says so.
+
+Place probabilities use the **discounted Harville** model (Lo &
+Bacon-Shone), not plain Harville. Plain Harville treats the race as a sequence
+of independent draws and therefore *overstates* how often a short-priced horse
+fills a minor placing -- good horses tend to either win or finish well beaten
+rather than politely collecting third. Backing a favourite to place on raw
+Harville numbers looks like value more often than it is. Place legs also have
+to clear a higher EV bar than win legs (5% vs 3%), because a place probability
+is derived through a model whose residual error we can't see, where a win
+probability is measured straight against a quoted win price.
 
 ## Scoring: technicals + fundamentals
 
@@ -148,8 +361,26 @@ with the winner is fixed):
 
 ## Known limitations
 
-- No pre-race market odds available from either site -- staking is
-  confidence-tiered, not true expected-value.
+- **India only:** no pre-race market odds available from either site --
+  staking is confidence-tiered, not true expected-value.
+- **Australia:** no automatic live prices from India (see "Getting odds in").
+  Live prices have to be pasted, so the parlay engine is only as current as
+  your last paste -- prices move, and a stale price is a fictional edge.
+  Racing Australia also publishes no jockey/trainer strike-rate leaderboard,
+  so on the AU and HK circuits those signals build up from your own archived
+  results; run `python -m scripts.daily --backfill 21` before expecting the
+  connections signal to mean anything.
+- **Hong Kong:** in season only (September to mid-July), and the race-card
+  parser is unverified until the new season opens -- see Data sources.
+- **The parlay engine's probabilities are unproven.** The Followup tab's
+  calibration table is the thing to watch: if slips predicted to land 25% of
+  the time land 12% of the time, the model is overconfident and every stake it
+  suggests is too big. It takes 30-50 settled slips before that table says
+  anything real, and until then every number in the app should be treated as a
+  hypothesis.
+- `use_container_width` is deprecated in the installed Streamlit and warns on
+  every render. Harmless today, but it's scheduled for removal and the whole
+  file will need `width='stretch'` at some point.
 - Speed figures aren't implemented yet (Phase 2) -- ranking currently uses
   rating + form + connections only.
 - Parsers are regex/line-position based against RWITC's legacy HTML; if the

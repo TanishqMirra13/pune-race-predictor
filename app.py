@@ -7,15 +7,20 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from db.schema import get_connection, init_db
-from db.ingest import store_racecard, store_raceresult
-from scrapers import rwitc, btc
+from db.ingest import (
+    load_market_odds, save_parlay, settle_parlays, store_intl_racecard,
+    store_intl_results, store_market_odds, store_racecard, store_raceresult,
+)
+from scrapers import rwitc, btc, hkjc, odds_import, racingaustralia as ra
 from models.rating_engine import compute_composite_scores
+from models import parlay as parlay_engine
+from models.odds import margin_percent, overround
 from models.staking import (
     build_win_place_plan, harville_forecast_probabilities, jackpot_leg_plan, stop_rules,
     build_place_shortlist,
 )
 
-st.set_page_config(page_title="Pune Race Predictor", layout="wide")
+st.set_page_config(page_title="Race Predictor -- India / Australia / Hong Kong", layout="wide")
 init_db()
 conn = get_connection()
 
@@ -25,24 +30,50 @@ conn = get_connection()
 # the rest of the app doesn't need to know which source it's talking to.
 SCRAPER_BY_VENUE = {"Pune": rwitc, "Mumbai": rwitc, "Bangalore": btc}
 
+# The three circuits differ in one way that matters more than any other: only
+# Australia and Hong Kong publish a market price, which is what makes expected
+# value -- and therefore the parlay engine -- possible at all.
+CIRCUITS = {
+    "India": {
+        "venues": ["Pune", "Mumbai", "Bangalore"],
+        "has_market": False,
+        "note": "RWITC and BTC publish no pre-race odds, so India gets ranked picks but no EV or parlays.",
+    },
+    "Australia": {
+        "venues": [],  # discovered from Racing Australia's calendar per date
+        "has_market": True,
+        "note": "Racing Australia publishes fields, ratings, form and starting prices. Races every day of the year.",
+    },
+    "Hong Kong": {
+        "venues": ["Happy Valley", "Sha Tin"],
+        "has_market": True,
+        "note": "HKJC publishes everything, but only in season (September to mid-July).",
+    },
+}
+
 
 def next_saturday(d: date) -> date:
     days_ahead = (5 - d.weekday()) % 7  # Saturday = 5
     return d + timedelta(days=days_ahead or 7 if d.weekday() == 5 else days_ahead)
 
 
-st.title("🐎 Pune Race Predictor")
+st.title("🐎 Race Predictor -- India / Australia / Hong Kong")
 st.warning(
     "This is entertainment analysis for fun-money wagering, not a winner-picker. "
     "Horse racing is genuinely unpredictable -- the ranked picks below are a transparent, "
     "data-backed shortlist, not a guarantee. Only stake what you've told the app is your "
     "budget for the day, and check the Bankroll & Calibration tab regularly to see how the "
-    "model's confidence has actually tracked against real outcomes.",
+    "model's confidence has actually tracked against real outcomes. On the Australian and "
+    "Hong Kong circuits, read the Daily Parlays tab's expected-value figure before backing "
+    "anything: a multi with negative EV loses money over time however good the horses look.",
     icon="⚠️",
 )
 
 with st.sidebar:
     st.header("Today's session")
+    circuit = st.radio("Circuit", list(CIRCUITS), horizontal=True)
+    st.caption(CIRCUITS[circuit]["note"])
+
     if "race_date_input" not in st.session_state:
         st.session_state["race_date_input"] = next_saturday(date.today())
     col_today, col_sat = st.columns(2)
@@ -51,55 +82,166 @@ with st.sidebar:
     if col_sat.button("Next Saturday", use_container_width=True):
         st.session_state["race_date_input"] = next_saturday(date.today())
     race_date = st.date_input("Race date", key="race_date_input")
-    venue = st.selectbox("Venue", ["Pune", "Mumbai", "Bangalore"])
-    budget = st.number_input("Budget for today (fun money, Rs)", min_value=0.0, value=1000.0, step=100.0)
-    goal = st.number_input("Goal / mental target (Rs profit)", min_value=0.0, value=500.0, step=100.0)
     date_str = race_date.strftime("%Y-%m-%d")
 
+    # Venues already loaded into the DB for this circuit/date, so the selector
+    # reflects what is actually available rather than a hard-coded list.
+    loaded_venues = [r["venue"] for r in conn.execute(
+        "SELECT DISTINCT venue FROM races WHERE race_date=? AND circuit=? ORDER BY venue",
+        (date_str, circuit),
+    ).fetchall()]
+
+    if circuit == "India":
+        venue = st.selectbox("Venue", CIRCUITS["India"]["venues"])
+    else:
+        options = loaded_venues or CIRCUITS[circuit]["venues"]
+        venue = st.selectbox("Venue (loaded)", options) if options else None
+        if not options:
+            st.info("No meeting loaded for this date yet -- load one below.")
+
+    budget = st.number_input("Budget for today (fun money, Rs)", min_value=0.0, value=1000.0, step=100.0)
+    goal = st.number_input("Goal / mental target (Rs profit)", min_value=0.0, value=500.0, step=100.0)
+
     st.divider()
-    st.subheader("Load race card")
-    col1, col2 = st.columns(2)
-    source = SCRAPER_BY_VENUE[venue]
-    with col1:
-        if st.button("Fetch live", use_container_width=True):
-            try:
-                html = source.fetch_racecard_html(date_str, use_cache=False)
-                races = source.parse_racecard(html)
-                if not races:
-                    st.error("No races found for this date -- the site may not have posted a card yet.")
-                else:
+
+    if circuit == "India":
+        st.subheader("Load race card")
+        col1, col2 = st.columns(2)
+        source = SCRAPER_BY_VENUE[venue]
+        with col1:
+            if st.button("Fetch live", use_container_width=True):
+                try:
+                    html = source.fetch_racecard_html(date_str, use_cache=False)
+                    races = source.parse_racecard(html)
+                    if not races:
+                        st.error("No races found for this date -- the site may not have posted a card yet.")
+                    else:
+                        store_racecard(conn, date_str, venue, races)
+                        st.success(f"Loaded {len(races)} races for {date_str}.")
+                except Exception as e:
+                    st.error(f"Fetch failed: {e}. Try the manual paste fallback below.")
+        with col2:
+            if st.button("Fetch results", use_container_width=True):
+                try:
+                    html = source.fetch_raceresult_html(date_str, use_cache=False)
+                    races = source.parse_raceresult(html)
+                    if not races:
+                        st.error("No results found for this date yet.")
+                    else:
+                        store_raceresult(conn, date_str, venue, races)
+                        st.success(f"Loaded results for {len(races)} races.")
+                except Exception as e:
+                    st.error(f"Fetch failed: {e}")
+
+        with st.expander("Manual paste fallback"):
+            st.caption("If live fetch fails (site down, blocked, or off-season), paste the race card HTML source here.")
+            pasted = st.text_area("Race card HTML", height=100)
+            if st.button("Parse pasted HTML"):
+                try:
+                    races = source.parse_racecard(pasted)
                     store_racecard(conn, date_str, venue, races)
-                    st.success(f"Loaded {len(races)} races for {date_str}.")
-            except Exception as e:
-                st.error(f"Fetch failed: {e}. Try the manual paste fallback below.")
-    with col2:
-        if st.button("Fetch results", use_container_width=True):
+                    st.success(f"Parsed and stored {len(races)} races.")
+                except Exception as e:
+                    st.error(f"Could not parse pasted HTML: {e}")
+
+    elif circuit == "Australia":
+        st.subheader("Load Australian meetings")
+        st.caption(
+            "Australia races somewhere every day, usually at 5-10 tracks at once. "
+            "Pick the meetings you actually want -- loading all of them is slow and "
+            "most country cards are small fields with thin form."
+        )
+        states = st.multiselect("States", ra.STATES, default=["NSW", "VIC"])
+        if st.button("Find meetings", use_container_width=True):
             try:
-                html = source.fetch_raceresult_html(date_str, use_cache=False)
-                races = source.parse_raceresult(html)
+                found = ra.meetings_for_date(date_str, states, use_cache=False)
+                st.session_state["au_meetings"] = found
+                if not found:
+                    st.warning(f"No meetings found for {date_str} in {', '.join(states)}.")
+            except Exception as e:
+                st.error(f"Could not read the calendar: {e}")
+
+        meetings = st.session_state.get("au_meetings", [])
+        if meetings:
+            labels = {f"{m['state']} -- {m['venue']}": m for m in meetings}
+            chosen = st.multiselect("Meetings", list(labels))
+            c_load, c_res = st.columns(2)
+            if c_load.button("Load fields", use_container_width=True, disabled=not chosen):
+                total = 0
+                for label in chosen:
+                    m = labels[label]
+                    try:
+                        races = ra.parse_racecard(ra.fetch_form_html(m["key"], use_cache=False))
+                        total += store_intl_racecard(conn, date_str, m["venue"], "Australia",
+                                                     races, country="AU", source_key=m["key"])
+                    except Exception as e:
+                        st.error(f"{m['venue']}: {e}")
+                st.success(f"Loaded {total} runners. Now add odds in the Odds tab.")
+                st.rerun()
+            if c_res.button("Load results", use_container_width=True, disabled=not chosen):
+                total = 0
+                for label in chosen:
+                    m = labels[label]
+                    try:
+                        races = ra.parse_raceresult(ra.fetch_results_html(m["key"], use_cache=False))
+                        total += store_intl_results(conn, date_str, m["venue"], "Australia",
+                                                    races, country="AU")
+                    except Exception as e:
+                        st.error(f"{m['venue']}: {e}")
+                st.success(f"Stored {total} result rows (starting prices included).")
+                st.rerun()
+
+    elif circuit == "Hong Kong":
+        st.subheader("Load Hong Kong meeting")
+        season = hkjc.season_status()
+        (st.success if season["in_season"] else st.info)(season["message"])
+        course = st.selectbox("Racecourse", ["HV", "ST"],
+                              format_func=lambda c: f"{c} -- {hkjc.RACECOURSES[c]}")
+        c_card, c_res = st.columns(2)
+        if c_card.button("Load card", use_container_width=True):
+            try:
+                races = hkjc.fetch_meeting_card(date_str, course, use_cache=False)
                 if not races:
-                    st.error("No results found for this date yet.")
+                    st.warning("No card published for that date. HKJC posts a card a few days "
+                               "before a meeting and removes it once the meeting has run.")
                 else:
-                    store_raceresult(conn, date_str, venue, races)
-                    st.success(f"Loaded results for {len(races)} races.")
+                    n = store_intl_racecard(conn, date_str, hkjc.RACECOURSES[course], "Hong Kong",
+                                            races, country="HK")
+                    live = hkjc.win_odds_from_card(races)
+                    if live:
+                        store_market_odds(conn, date_str, hkjc.RACECOURSES[course], live, source="live")
+                    st.success(f"Loaded {n} runners, {len(live)} live prices.")
+                    st.rerun()
             except Exception as e:
                 st.error(f"Fetch failed: {e}")
-
-    with st.expander("Manual paste fallback"):
-        st.caption("If live fetch fails (site down, blocked, or off-season), paste the race card HTML source here.")
-        pasted = st.text_area("Race card HTML", height=100)
-        if st.button("Parse pasted HTML"):
+        if c_res.button("Load results", use_container_width=True):
             try:
-                races = source.parse_racecard(pasted)
-                store_racecard(conn, date_str, venue, races)
-                st.success(f"Parsed and stored {len(races)} races.")
+                races = hkjc.fetch_meeting_results(date_str, course, use_cache=False)
+                if not races:
+                    st.warning("No local results for that date.")
+                else:
+                    n = store_intl_results(conn, date_str, hkjc.RACECOURSES[course], "Hong Kong",
+                                           races, country="HK")
+                    st.success(f"Stored {n} result rows across {len(races)} races.")
+                    st.rerun()
             except Exception as e:
-                st.error(f"Could not parse pasted HTML: {e}")
+                st.error(f"Fetch failed: {e}")
 
     st.divider()
     st.subheader("Fundamentals")
     st.caption("Official season-to-date jockey/trainer strike rates -- feeds the connections signal in every pick.")
-    if st.button("Fetch trackwork + mock races", use_container_width=True):
+    if circuit != "India":
+        # Trackwork (indiarace) and mock races (racingpulse) are Indian sources,
+        # and neither Racing Australia nor HKJC publishes a strike-rate table in
+        # the form this app consumes -- for those circuits the same signal is
+        # derived from our own results archive instead, via the backfill script.
+        st.caption(
+            f"These feeds are India-only. On the {circuit} circuit, jockey and trainer strike "
+            f"rates build up from the results you load, so archive a few weeks of past meetings "
+            f"first -- `python -m scripts.daily --backfill 21` -- to give the connections signal "
+            f"something to work with."
+        )
+    elif st.button("Fetch trackwork + mock races", use_container_width=True):
         try:
             from db.ingest import store_workouts
             from scrapers import indiarace, racingpulse
@@ -118,7 +260,7 @@ with st.sidebar:
             st.success(msg)
         except Exception as e:
             st.error(f"Workout fetch failed: {e}")
-    if st.button("Refresh jockey/trainer stats", use_container_width=True):
+    if circuit == "India" and st.button("Refresh jockey/trainer stats", use_container_width=True):
         try:
             from db.ingest import store_connection_stats
             j = source.parse_jockey_stats(source.fetch_jockey_stats_html(use_cache=False))
@@ -145,10 +287,41 @@ def get_race_plans(d: str, v: str) -> list[dict]:
     return plans
 
 
-race_plans = get_race_plans(date_str, venue)
+def get_slate(d: str, c: str) -> list[dict]:
+    """Every race of a circuit on a date, across ALL its venues, with model
+    scores and whatever market prices we hold.
 
-tab_today, tab_place, tab_forecast, tab_jackpot, tab_connections, tab_backtest, tab_bankroll = st.tabs(
-    ["Today's Picks", "Place Bets", "Forecast / Quinella", "Jackpot Planner", "Connections", "Backtest", "Bankroll & Calibration"]
+    Separate from get_race_plans because a multi is built ACROSS meetings --
+    the whole point of requiring legs from different races is that they be
+    independent, and on the Australian circuit the best three independent
+    value bets on a given day are rarely at one track."""
+    rows = conn.execute(
+        """SELECT id, venue, race_number, race_name, class_code, distance_m, race_time_local
+           FROM races WHERE race_date=? AND circuit=? ORDER BY venue, race_number""",
+        (d, c),
+    ).fetchall()
+    slate = []
+    for row in rows:
+        entries = compute_composite_scores(conn, row["id"])
+        if not entries:
+            continue
+        slate.append({
+            "race_id": row["id"], "venue": row["venue"], "race_no": row["race_number"],
+            "race_name": row["race_name"], "race_time": row["race_time_local"],
+            "class_code": row["class_code"], "distance_m": row["distance_m"],
+            "circuit": c, "field_size": len(entries), "entries": entries,
+            "odds": load_market_odds(conn, row["id"]),
+        })
+    return slate
+
+
+race_plans = get_race_plans(date_str, venue) if venue else []
+slate = get_slate(date_str, circuit)
+
+(tab_today, tab_parlay, tab_odds, tab_followup, tab_place, tab_forecast,
+ tab_jackpot, tab_connections, tab_backtest, tab_bankroll) = st.tabs(
+    ["Today's Picks", "Daily Parlays", "Odds", "Followup", "Place Bets",
+     "Forecast / Quinella", "Jackpot Planner", "Connections", "Backtest", "Bankroll & Calibration"]
 )
 
 with tab_today:
@@ -688,3 +861,319 @@ with tab_bankroll:
             use_container_width=True, hide_index=True,
         )
         st.metric("Total P&L to date", f"Rs{sum(r['pnl'] for r in all_time):.0f}")
+
+
+# ===========================================================================
+# Odds -- nothing downstream works without a market price
+# ===========================================================================
+with tab_odds:
+    st.subheader("Market odds")
+    if not CIRCUITS[circuit]["has_market"]:
+        st.info(
+            "The Indian clubs publish no pre-race odds at all -- prices only appear after the "
+            "race, on the results page. That is why the India circuit has ranked picks but no "
+            "expected value and no parlays. Switch to Australia or Hong Kong to use those."
+        )
+    elif not slate:
+        st.info("Load a meeting first (sidebar).")
+    else:
+        priced = sum(1 for r in slate if r["odds"])
+        st.caption(
+            f"{priced} of {len(slate)} loaded races have prices. Every race without a price is "
+            f"invisible to the parlay engine -- there is nothing to measure an edge against."
+        )
+
+        st.markdown("#### Paste prices from your bookmaker")
+        st.caption(
+            "The reliable path. Copy the win (and place, if shown) prices off any screen and paste "
+            "them here -- one runner per line. Recognised shapes: `MAGIC MOMENT 3.40`, "
+            "`7. Magic Moment $3.40 $1.55`, `Magic Moment 5/2`. Header and junk lines are ignored."
+        )
+        race_options = {f"{r['venue']} R{r['race_no']} -- {r['race_name'] or ''}"[:60]: r for r in slate}
+        pick = st.selectbox("Race", list(race_options))
+        target = race_options[pick]
+        text = st.text_area("Prices", height=160, placeholder="HORSE NAME 3.40 1.55")
+        c1, c2 = st.columns([1, 3])
+        market_mode = c2.radio("A single number per line is a...", ["win price", "place price"],
+                               horizontal=True)
+        if c1.button("Save prices", use_container_width=True) and text.strip():
+            rows = odds_import.paste_odds(
+                text, target["race_no"],
+                default_market="win" if market_mode == "win price" else "place")
+            result = store_market_odds(conn, date_str, target["venue"], rows, source="manual")
+            if result["matched"]:
+                st.success(f"Stored prices for {result['matched']} runners.")
+            if result["unmatched"]:
+                st.warning(
+                    "These names did not match any runner in that race, so they were NOT stored "
+                    "(check spelling against the field): "
+                    + ", ".join(f"{u['horse_name']} ({u['reason']})" for u in result["unmatched"][:8])
+                )
+            if result["matched"]:
+                st.rerun()
+
+        st.divider()
+        st.markdown("#### What's stored for this race")
+        held = target["odds"]
+        if held:
+            names = [e["horse_name"] for e in target["entries"]]
+            win_prices = [held.get(n, {}).get("win") for n in names]
+            live = [p for p in win_prices if p]
+            if len(live) >= 3:
+                st.caption(
+                    f"Book overround **{overround(live):.3f}** -- the market keeps about "
+                    f"**{margin_percent(live):.1f}%** of turnover on this race. A fair book would be 1.000. "
+                    f"You start every bet that far behind."
+                )
+            st.dataframe(
+                [{"Horse": n,
+                  "Win": held.get(n, {}).get("win") or "-",
+                  "Place": held.get(n, {}).get("place") or "-",
+                  "Model win %": f"{e['win_probability'] * 100:.1f}%"}
+                 for n, e in zip(names, target["entries"])],
+                use_container_width=True, hide_index=True,
+            )
+        else:
+            st.info("No prices stored for this race yet.")
+
+        with st.expander("Automatic odds via an API you already have access to"):
+            status = odds_import.api_config_status()
+            st.markdown(
+                "**Never paste an API key into a chat window or a source file.** Put it in a "
+                "`.env` file in the project root -- `.gitignore` already covers it -- and this app "
+                "reads it from there. The variables it looks for:\n\n"
+                "```\nODDS_API_URL=https://.../races/{race}/odds\n"
+                "ODDS_API_TOKEN=your-key-here\n"
+                "ODDS_API_TOKEN_HEADER=x-access-token\n"
+                "ODDS_API_RUNNER_PATH=data.race.runners\n"
+                "ODDS_API_NAME_FIELD=name\nODDS_API_WIN_FIELD=winOdds\n"
+                "ODDS_API_PLACE_FIELD=placeOdds\n```"
+            )
+            st.json({k: v for k, v in status.items() if k != "token_length"} |
+                    {"token_length": status["token_length"]})
+            if not status["ready"]:
+                st.caption("Not configured yet -- the paste box above needs nothing and works today.")
+            else:
+                ref = st.text_input("Race reference to substitute for {race}")
+                if st.button("Fetch from API"):
+                    try:
+                        rows = odds_import.fetch_from_api(ref or None)
+                        rows = [{**r, "race_no": target["race_no"]} for r in rows]
+                        res = store_market_odds(conn, date_str, target["venue"], rows, source="api")
+                        st.success(f"Stored {res['matched']} runners from the API.")
+                        if res["unmatched"]:
+                            st.warning(f"{len(res['unmatched'])} names did not match the field.")
+                    except Exception as e:
+                        st.error(str(e))
+
+
+# ===========================================================================
+# Daily parlays
+# ===========================================================================
+with tab_parlay:
+    st.subheader("Daily parlays")
+
+    if not CIRCUITS[circuit]["has_market"]:
+        st.info(
+            "Parlays need a price to test against, and the Indian clubs publish none pre-race. "
+            "Use the Australia or Hong Kong circuit."
+        )
+    else:
+        st.markdown(
+            "**A multi is only worth placing when every leg is independently good value.** "
+            "Each leg carries the bookmaker's margin, and combining legs multiplies those margins "
+            "together -- three legs into a typical 16% book means betting into a 36% margin. No "
+            "staking plan beats that. So the engine below qualifies each selection on its own "
+            "first, and combines only what survives."
+        )
+        c1, c2, c3 = st.columns(3)
+        bankroll = c1.number_input("Bankroll (Rs)", min_value=100.0, value=10000.0, step=500.0,
+                                   help="Your whole betting bankroll, not today's budget. Stake sizes scale off this.")
+        model_weight = c2.slider(
+            "Weight on our model vs the market", 0.0, 1.0, 0.35, 0.05,
+            help="The backtest found the market's favourite beat this model's pick when the two "
+                 "disagreed, so the default leans on the market. Raising this makes the engine "
+                 "bolder and, on the evidence, worse.",
+        )
+        target = c3.number_input("Daily profit target (Rs)", min_value=0.0, value=750.0, step=100.0)
+
+        priced_races = [r for r in slate if r["odds"]]
+        if not priced_races:
+            st.warning(
+                f"{len(slate)} races loaded but none has a price attached. Add prices in the Odds "
+                f"tab -- without them there is no edge to measure and nothing to suggest."
+            )
+        else:
+            card = parlay_engine.daily_parlay_card(
+                priced_races, bankroll=bankroll, model_weight=model_weight, circuit=circuit)
+
+            st.info(card["verdict"])
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Races priced", f"{len(priced_races)}/{len(slate)}")
+            m2.metric("Value selections", len(card["legs"]))
+            m3.metric("Multis clearing the bar", card["total_suggestions"])
+
+            if card["singles"]:
+                st.markdown("#### Singles first")
+                st.caption(
+                    "The same selections as straight win/place bets. A single on a value pick has "
+                    "the identical edge to that leg inside a multi, with a fraction of the swing. "
+                    "If the aim is a small regular return rather than a big day, this table is the "
+                    "honest answer and everything below it is entertainment."
+                )
+                st.dataframe(
+                    [{"Race": f"{s['venue']} R{s['race_no']}", "Selection": s["horse_name"],
+                      "Bet": s["market"], "Price": s["decimal_odds"],
+                      "Our fair price": s["fair_odds"],
+                      "Our chance": f"{s['blended_probability'] * 100:.0f}%",
+                      "Edge": f"{s['expected_value'] * 100:+.1f}%",
+                      "Stake (Rs)": s["suggested_stake"],
+                      "Returns (Rs)": s["potential_profit"]}
+                     for s in card["singles"]],
+                    use_container_width=True, hide_index=True,
+                )
+
+            for key, prof in card["profiles"].items():
+                st.markdown(f"#### {prof['label']}")
+                st.caption(prof["description"])
+                if not prof["parlays"]:
+                    st.caption("_Nothing today clears this profile's bar._")
+                    continue
+                for i, pl in enumerate(prof["parlays"]):
+                    legs_txt = "  +  ".join(
+                        f"**{l['horse_name']}** ({l['venue']} R{l['race_no']}, {l['market']} @ {l['decimal_odds']})"
+                        for l in pl["legs"])
+                    with st.container(border=True):
+                        st.markdown(legs_txt)
+                        k1, k2, k3, k4 = st.columns(4)
+                        k1.metric("Combined odds", f"{pl['combined_odds']:.2f}")
+                        k2.metric("Chance it lands", f"{pl['hit_probability'] * 100:.1f}%")
+                        k3.metric("Edge", f"{pl['expected_value'] * 100:+.1f}%")
+                        k4.metric("Kelly stake", f"Rs{pl['suggested_stake']:.0f}")
+                        st.caption(
+                            f"Fair combined price would be {pl['fair_combined_odds']:.2f}; you are being "
+                            f"offered {pl['combined_odds']:.2f}. Margin given up across the legs: "
+                            f"{pl['margin_drag'] * 100:.0f}%. At the Kelly stake this returns "
+                            f"Rs{pl['potential_profit']:.0f} when it lands."
+                        )
+                        feas = parlay_engine.target_feasibility(pl, target, bankroll)
+                        if feas.get("achievable"):
+                            warn = ("  ⚠️ that is "
+                                    f"{feas['stake_vs_kelly']}x the Kelly stake -- above Kelly you are "
+                                    "growing risk faster than return"
+                                    if feas.get("exceeds_kelly") else
+                                    "  ✅ that sits inside the Kelly stake")
+                            st.caption(f"To clear Rs{target:.0f}: stake Rs{feas['required_stake']:.0f}.{warn}")
+                            st.caption(feas["note"])
+                        outlook = parlay_engine.expected_daily_outcome(pl, pl["suggested_stake"], days=30)
+                        st.caption(
+                            f"Backed every day for a month at the Kelly stake: about "
+                            f"{outlook['expected_hits']:.0f} hits, expected P&L "
+                            f"Rs{outlook['expected_pnl']:+.0f}, and a typical longest losing run of "
+                            f"{outlook['typical_longest_losing_run']} days. {outlook['verdict']}."
+                        )
+                        if st.button("Save to followup", key=f"save_{key}_{i}"):
+                            save_parlay(conn, date_str, circuit, pl,
+                                        stake=pl["suggested_stake"], placed=False,
+                                        notes=prof["label"])
+                            st.success("Saved -- settle it in the Followup tab once the races have run.")
+
+            if card["rejected_races"]:
+                with st.expander(f"{len(card['rejected_races'])} race(s) produced no value selection"):
+                    st.caption(
+                        "Worth reading rather than skipping: 'no edge on offer' is the normal, "
+                        "correct outcome for most races, and a day with none at all is a day to sit out."
+                    )
+                    for r in card["rejected_races"]:
+                        st.write(f"**{r['race']}** -- {r['reason']}")
+
+
+# ===========================================================================
+# Followup -- settle yesterday, and see whether any of this is working
+# ===========================================================================
+with tab_followup:
+    st.subheader("Daily followup")
+    st.caption(
+        "The part that decides whether this is a side hustle or an expensive hobby. Settle each "
+        "day's slips against the actual results, then read the calibration table: if the multis "
+        "that were supposed to land 25% of the time land 12% of the time, the model is "
+        "overconfident and every stake it suggests is too big."
+    )
+
+    c1, c2 = st.columns([1, 2])
+    if c1.button("Settle this date", use_container_width=True):
+        res = settle_parlays(conn, date_str)
+        if res["settled"]:
+            st.success(
+                f"Settled {res['settled']} slips -- {res['won']} won, {res['lost']} lost. "
+                f"Staked Rs{res['staked']:.0f}, returned Rs{res['returned']:.0f} "
+                f"(P&L Rs{res['pnl']:+.0f})."
+            )
+        else:
+            st.info(f"Nothing to settle. {res['pending']} slip(s) still waiting on results -- "
+                    f"load the results for those meetings in the sidebar first.")
+    c2.caption("Settlement needs results loaded for every leg's meeting. A slip whose races "
+               "haven't run stays pending rather than being graded early.")
+
+    rows = conn.execute(
+        "SELECT * FROM parlays WHERE race_date=? ORDER BY id DESC", (date_str,)).fetchall()
+    if not rows:
+        st.info("No parlays saved for this date. Save one from the Daily Parlays tab.")
+    else:
+        for p in rows:
+            legs = conn.execute(
+                "SELECT * FROM parlay_legs WHERE parlay_id=? ORDER BY leg_no", (p["id"],)).fetchall()
+            icon = {"won": "✅", "lost": "❌", "pending": "⏳"}.get(p["status"], "⏳")
+            header = (f"{icon} {p['label'] or p['kind']} -- {p['combined_odds']:.2f} @ "
+                      f"Rs{p['stake'] or 0:.0f} -- {p['status']}")
+            with st.expander(header, expanded=p["status"] == "pending"):
+                st.dataframe(
+                    [{"Leg": l["leg_no"], "Race": f"{l['venue']} R{l['race_no']}",
+                      "Selection": l["horse_name"], "Bet": l["market"],
+                      "Price": l["decimal_odds"],
+                      "Our chance": f"{(l['blended_probability'] or 0) * 100:.0f}%",
+                      "Result": l["outcome"]} for l in legs],
+                    use_container_width=True, hide_index=True,
+                )
+                if p["status"] == "won":
+                    st.success(f"Returned Rs{p['payout'] or 0:.0f} "
+                               f"(profit Rs{(p['payout'] or 0) - (p['stake'] or 0):+.0f})")
+                elif p["status"] == "lost":
+                    st.error(f"Lost Rs{p['stake'] or 0:.0f}")
+
+    st.divider()
+    st.markdown("#### Are the parlay probabilities honest?")
+    settled = conn.execute(
+        "SELECT hit_probability, status, stake, payout FROM parlays WHERE status IN ('won','lost')"
+    ).fetchall()
+    if len(settled) < 10:
+        st.caption(
+            f"Only {len(settled)} settled slips so far. Calibration needs 30-50 before it says "
+            f"anything real -- until then, treat every number in this app as unproven and stake "
+            f"accordingly."
+        )
+    else:
+        buckets: dict = {}
+        for s in settled:
+            b = round((s["hit_probability"] or 0) * 4) / 4  # 0, 25%, 50%, 75%, 100%
+            slot = buckets.setdefault(b, {"n": 0, "won": 0})
+            slot["n"] += 1
+            slot["won"] += 1 if s["status"] == "won" else 0
+        st.dataframe(
+            [{"We predicted": f"{k * 100:.0f}%", "Actually landed": f"{v['won'] / v['n'] * 100:.0f}%",
+              "Slips": v["n"]} for k, v in sorted(buckets.items())],
+            use_container_width=True, hide_index=True,
+        )
+        staked = sum(s["stake"] or 0 for s in settled)
+        returned = sum(s["payout"] or 0 for s in settled)
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Total staked", f"Rs{staked:.0f}")
+        m2.metric("Total returned", f"Rs{returned:.0f}")
+        m3.metric("P&L", f"Rs{returned - staked:+.0f}",
+                  delta=f"{((returned / staked - 1) * 100) if staked else 0:+.1f}% ROI")
+        if staked and returned < staked:
+            st.warning(
+                "Running at a loss. That is the expected outcome of betting into a margin without "
+                "a real edge, and no change of selection method fixes it -- the thing to check is "
+                "whether the predicted column above is consistently above the actual one."
+            )
