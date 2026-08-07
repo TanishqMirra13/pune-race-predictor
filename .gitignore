@@ -18,15 +18,13 @@ data/*
 # Dev scratch specs not part of the app
 docs/
 
-# Streamlit local secrets (never commit real secrets)
-.streamlit/secrets.toml
-
-# Bookmaker/odds API credentials. scrapers/odds_import.py reads the token from
-# here and nowhere else, so this MUST stay ignored -- committing it would push
-# a live betting-account key to the remote.
+# Secrets -- never commit. .env holds the bookmaker/odds API credentials that
+# scrapers/odds_import.py reads; committing it would push a live betting-account
+# key to the remote. On Streamlit Cloud these go in the app's Secrets panel.
 .env
 .env.*
 !.env.example
+.streamlit/secrets.toml
 
 # OS junk
 .DS_Store
