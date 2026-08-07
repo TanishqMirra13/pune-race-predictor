@@ -23,8 +23,19 @@ from models.staking import (
     build_win_place_plan, harville_forecast_probabilities, jackpot_leg_plan, stop_rules,
     build_place_shortlist,
 )
+from ui.theme import inject_theme
+from ui import components as ui
 
-st.set_page_config(page_title="Race Predictor -- India / Australia / Hong Kong", layout="wide")
+# layout="centered" (not "wide"): the primary use is a phone at the track, and
+# "wide" forces a desktop-width grid that squeezes content into a column on
+# small screens. Detail tabs still scroll fine inside the centered container.
+st.set_page_config(
+    page_title="Race Predictor -- India / Australia / Hong Kong",
+    page_icon="🐎",
+    layout="centered",
+    initial_sidebar_state="collapsed",
+)
+inject_theme()
 init_db()
 conn = get_connection()
 
@@ -61,17 +72,24 @@ def next_saturday(d: date) -> date:
     return d + timedelta(days=days_ahead or 7 if d.weekday() == 5 else days_ahead)
 
 
-st.title("🐎 Race Predictor -- India / Australia / Hong Kong")
-st.warning(
-    "This is entertainment analysis for fun-money wagering, not a winner-picker. "
-    "Horse racing is genuinely unpredictable -- the ranked picks below are a transparent, "
-    "data-backed shortlist, not a guarantee. Only stake what you've told the app is your "
-    "budget for the day, and check the Bankroll & Calibration tab regularly to see how the "
-    "model's confidence has actually tracked against real outcomes. On the Australian and "
-    "Hong Kong circuits, read the Daily Parlays tab's expected-value figure before backing "
-    "anything: a multi with negative EV loses money over time however good the horses look.",
-    icon="⚠️",
-)
+st.title("🐎 Race Predictor")
+# The full responsible-wagering note stays one tap away rather than consuming the
+# whole first screen on a phone -- the short line carries the essential warning,
+# the expander keeps the complete text (and the negative-EV parlay caveat) intact.
+st.caption("⚠️ Fun-money analysis, not a winner-picker. Racing is genuinely unpredictable.")
+with st.expander("Read this before you bet"):
+    st.markdown(
+        "These are a transparent, data-backed shortlist -- **not a guarantee**. "
+        "Only stake what you've set as your budget for the day, and check "
+        "**Bankroll & Calibration** regularly to see how the model's confidence has "
+        "actually tracked against real outcomes.\n\n"
+        "A pick is only a *bet* if the price is right: fair odds = (100 ÷ win%) − 1, "
+        "and you want the board paying more than that. The **Race Day** tab checks "
+        "this for you.\n\n"
+        "On the Australian and Hong Kong circuits, read the **Daily Parlays** "
+        "expected-value figure before backing anything: a multi with negative EV "
+        "loses money over time however good the horses look."
+    )
 
 with st.sidebar:
     st.header("Today's session")
@@ -328,11 +346,119 @@ STALE_ODDS_MINUTES = 90
 race_plans = get_race_plans(date_str, venue) if venue else []
 slate = get_slate(date_str, circuit)
 
-(tab_today, tab_parlay, tab_odds, tab_followup, tab_place, tab_forecast,
+# Tab order is deliberate: "Race Day" is the phone-at-the-track view and comes
+# first. Everything after it is homework you do at home on a laptop (backtest,
+# calibration, connections) -- it should not compete for thumb space.
+(tab_raceday, tab_today, tab_parlay, tab_odds, tab_followup, tab_place, tab_forecast,
  tab_jackpot, tab_connections, tab_backtest, tab_bankroll) = st.tabs(
-    ["Today's Picks", "Daily Parlays", "Odds", "Followup", "Place Bets",
+    ["Race Day", "Today's Picks", "Daily Parlays", "Odds", "Followup", "Place Bets",
      "Forecast / Quinella", "Jackpot Planner", "Connections", "Backtest", "Bankroll & Calibration"]
 )
+
+with tab_raceday:
+    if not race_plans:
+        st.info("No race card loaded. Open the sidebar (top-left ») and use **Fetch live**.")
+    else:
+        # One race at a time. Chips instead of 10 stacked expanders -- at the
+        # track you care about the race that's about to run, not the whole card.
+        race_nos = [rp["race_no"] for rp in race_plans]
+        chosen = st.radio(
+            "Race", race_nos, horizontal=True, label_visibility="collapsed",
+            format_func=lambda n: f"R{n}",
+        )
+        rp = next(r for r in race_plans if r["race_no"] == chosen)
+        entries = rp["entries"]
+
+        st.markdown(
+            f'<div class="rp-label">Race {rp["race_no"]} &middot; '
+            f'{ui._esc(rp.get("race_name") or "")}</div>',
+            unsafe_allow_html=True,
+        )
+
+        if not entries:
+            st.info("No runners parsed for this race.")
+        else:
+            top = entries[0]
+            field = len(entries)
+            baseline = 1.0 / field
+            edge_pp = (top["win_probability"] - baseline) * 100
+            fair = ui.fair_odds(top["win_probability"])
+
+            # Verdict = model's own confidence, before any market price is known.
+            has_edge = edge_pp >= 5
+            st.markdown(
+                ui.verdict_card(
+                    state="bet" if has_edge else "skip",
+                    tag="Model pick" if has_edge else "No clear edge",
+                    horse=top["horse_name"],
+                    subtitle=(
+                        f'{ui._esc(top.get("jockey") or "?")} &middot; '
+                        f'{ui._esc(top.get("trainer") or "?")}'
+                    ),
+                    stats=[
+                        {"k": "Win chance", "v": f'{top["win_probability"]*100:.0f}%'},
+                        {"k": "Fair odds", "v": f"{fair:.1f}/1" if fair else "-", "hl": True},
+                        {"k": "Edge", "v": f"{edge_pp:+.0f}pp"},
+                    ],
+                ),
+                unsafe_allow_html=True,
+            )
+
+            # The decision tool. Neither club publishes pre-race odds, so the
+            # board price is the one input only the user can supply -- typing it
+            # here closes the loop between model and counter.
+            st.markdown(ui.section_label("Check the board price"), unsafe_allow_html=True)
+            board = st.number_input(
+                f"Odds showing for {top['horse_name']} (e.g. 3 means 3/1)",
+                min_value=0.0, step=0.25, value=0.0, key=f"board_{rp['race_id']}",
+            )
+            if board > 0:
+                v = ui.value_verdict(top["win_probability"], board)
+                if v["verdict"] == "BET":
+                    st.success(
+                        f"**BET** — {board:.2f}/1 beats fair ({v['fair']:.2f}/1) with room to spare. "
+                        f"You're getting {v['edge_pct']:+.0f}% over break-even."
+                    )
+                elif v["verdict"] == "THIN":
+                    st.warning(
+                        f"**THIN** — {board:.2f}/1 is above fair ({v['fair']:.2f}/1) but under the "
+                        f"{v['required']:.2f}/1 you want as cushion for tote rake. Small stake or pass."
+                    )
+                else:
+                    st.error(
+                        f"**SKIP** — {board:.2f}/1 is below fair ({v['fair']:.2f}/1). "
+                        f"Model says this horse wins {top['win_probability']*100:.0f}% of the time; "
+                        f"at this price you lose money long-term even when it wins its share."
+                    )
+            else:
+                st.caption(
+                    f"Enter the tote board price to check it. Rule: bet only above "
+                    f"**{ui.fair_odds(top['win_probability']):.2f}/1**, ideally "
+                    f"**{ui.fair_odds(top['win_probability'])*1.25:.2f}/1**+."
+                )
+
+            st.markdown(ui.section_label(f"Full field · {field} runners"), unsafe_allow_html=True)
+            st.markdown(ui.runner_rows(entries), unsafe_allow_html=True)
+            st.caption("🔥 strong recent gallops · ⚠️ concerning work · 🔗 owner ties to race sponsor")
+
+            finishers = conn.execute(
+                """SELECT h.name, res.finish_position FROM runs r
+                   JOIN horses h ON h.id = r.horse_id JOIN results res ON res.run_id = r.id
+                   WHERE r.race_id = ? AND res.finish_position IS NOT NULL
+                   ORDER BY res.finish_position LIMIT 3""",
+                (rp["race_id"],),
+            ).fetchall()
+            if finishers:
+                won = finishers[0]["name"].upper() == top["horse_name"].upper()
+                placed = any(f["name"].upper() == top["horse_name"].upper() for f in finishers)
+                podium = " &middot; ".join(f'{f["finish_position"]}. {ui._esc(f["name"])}' for f in finishers)
+                if won:
+                    msg, outcome = f"<b>{ui._esc(top['horse_name'])} won.</b><br>{podium}", "won"
+                elif placed:
+                    msg, outcome = f"<b>{ui._esc(top['horse_name'])} placed.</b><br>{podium}", "neutral"
+                else:
+                    msg, outcome = f"Pick unplaced. Result: {podium}", "lost"
+                st.markdown(ui.result_banner(outcome=outcome, text=msg), unsafe_allow_html=True)
 
 with tab_today:
     if not race_plans:
