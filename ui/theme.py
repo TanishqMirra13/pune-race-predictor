@@ -162,6 +162,19 @@ div[role="radiogroup"] label:has(input:checked) p{color:var(--ink); font-weight:
 .rp-odds{font-family:var(--mono); font-size:.68rem; color:var(--text-3); margin-top:2px;}
 .rp-flag{font-size:.78rem; margin-left:5px;}
 
+/* Value badges + tones. Colour roles preserved: green=positive/BET,
+   orange=key-value/THIN, red=stop/SKIP, grey=no data. */
+.rp-badge{
+  display:inline-block; font-size:.58rem; font-weight:700; letter-spacing:.06em;
+  padding:2px 7px; border-radius:var(--r-pill); vertical-align:middle; margin-left:5px;
+}
+.rp-bg-pos{background:rgba(78,190,150,.16); color:var(--pos);}
+.rp-bg-warn{background:rgba(255,161,108,.16); color:var(--warn);}
+.rp-bg-neg{background:rgba(226,71,86,.15); color:var(--neg);}
+.rp-bg-mut{background:var(--surface-2); color:var(--text-3);}
+.rp-pos{color:var(--pos);} .rp-warn{color:var(--warn);}
+.rp-neg{color:var(--neg);} .rp-mut{color:var(--text-3);}
+
 /* Section label */
 .rp-label{
   font-size:.66rem; font-weight:600; letter-spacing:.09em; text-transform:uppercase;

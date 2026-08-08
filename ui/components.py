@@ -43,6 +43,68 @@ def value_verdict(probability: float, board_odds: float, cushion: float = 0.25) 
     return {"verdict": verdict, "fair": fair, "required": required, "edge_pct": edge_pct}
 
 
+def implied_probability(board_odds: float) -> float | None:
+    """Market's implied win chance from odds-to-one: p = 1 / (odds + 1).
+
+    Across a whole field these sum to >100% (the bookmaker's overround / tote
+    takeout). That's expected -- for a single bet what matters is the price YOU
+    get paid at, so the raw implied figure is the right comparison.
+    """
+    if board_odds is None or board_odds < 0:
+        return None
+    return 1.0 / (board_odds + 1.0)
+
+
+def value_rows(entries: list[dict], odds_map: dict, cushion: float = 0.25, limit: int = 10) -> str:
+    """Runners ranked by VALUE (model edge over the market price), not by raw
+    win chance. The likeliest horse and the profitable horse are different
+    questions -- a 50% shot at 0.5/1 loses money; a 20% shot at 6/1 makes it.
+    Runners with no published price fall to the bottom, marked no-price.
+    """
+    scored = []
+    for e in entries:
+        info = odds_map.get((e.get("horse_name") or "").upper())
+        p = e.get("win_probability") or 0.0
+        if not info:
+            scored.append({"e": e, "info": None, "edge": None, "verdict": "NO PRICE", "p": p})
+            continue
+        board = info["odds_decimal"]
+        imp = implied_probability(board)
+        v = value_verdict(p, board, cushion)
+        scored.append({
+            "e": e, "info": info, "edge": (p - imp) * 100 if imp else None,
+            "verdict": v["verdict"], "p": p, "implied": imp,
+        })
+    priced = [s for s in scored if s["edge"] is not None]
+    unpriced = [s for s in scored if s["edge"] is None]
+    priced.sort(key=lambda s: s["edge"], reverse=True)
+    ordered = (priced + unpriced)[:limit]
+
+    tone = {"BET": "pos", "THIN": "warn", "SKIP": "neg", "NO PRICE": "mut"}
+    rows = []
+    for s in ordered:
+        e, info = s["e"], s["info"]
+        cls = tone[s["verdict"]]
+        if info:
+            right = (
+                f'<div class="rp-pct rp-{cls}">{s["edge"]:+.0f}<span style="font-size:.6em">pp</span></div>'
+                f'<div class="rp-odds">{_esc(info["odds_fraction"])} &middot; mkt {s["implied"]*100:.0f}%</div>'
+            )
+        else:
+            right = '<div class="rp-pct rp-mut">&mdash;</div><div class="rp-odds">no price</div>'
+        rows.append(
+            f'<div class="rp-row">'
+            f'<div class="rp-id">'
+            f'<div class="rp-name">{_esc(e.get("horse_name"))} '
+            f'<span class="rp-badge rp-bg-{cls}">{s["verdict"]}</span></div>'
+            f'<div class="rp-meta">model {s["p"]*100:.0f}% &middot; {_esc(e.get("jockey") or "")}</div>'
+            f"</div>"
+            f'<div class="rp-val">{right}</div>'
+            f"</div>"
+        )
+    return f'<div class="rp-card" style="padding:6px 12px">{"".join(rows)}</div>'
+
+
 def _esc(v) -> str:
     return html.escape(str(v)) if v is not None else ""
 

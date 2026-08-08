@@ -437,6 +437,40 @@ with tab_raceday:
                     f"**{ui.fair_odds(top['win_probability'])*1.25:.2f}/1**+."
                 )
 
+            # Value view. Ranking by win chance answers "which horse is best";
+            # ranking by edge over the market answers "which horse is worth
+            # backing" -- the question that actually decides profit.
+            odds_map = st.session_state.get(f"odds_{date_str}_{venue}")
+            st.markdown(ui.section_label("Best value in this race"), unsafe_allow_html=True)
+            if odds_map is None:
+                st.caption(
+                    "indiarace publishes forecast prices for Indian races. Pull them to see "
+                    "which runners are **underpriced** rather than just which are fastest."
+                )
+                if st.button("Get odds from indiarace", use_container_width=True, key="get_odds"):
+                    try:
+                        from scrapers import indiarace as ir
+                        raw = ir.fetch_odds_html(venue, date_str, use_cache=False)
+                        if not raw:
+                            st.warning(f"indiarace has no odds feed for {venue}.")
+                        else:
+                            fetched = ir.parse_odds(raw)
+                            if fetched:
+                                st.session_state[f"odds_{date_str}_{venue}"] = fetched
+                                st.rerun()
+                            else:
+                                st.warning("No odds posted for this date yet -- they usually appear the night before.")
+                    except Exception as e:
+                        st.error(f"Odds fetch failed: {e}")
+            else:
+                matched = sum(1 for e in entries if (e["horse_name"] or "").upper() in odds_map)
+                st.markdown(ui.value_rows(entries, odds_map), unsafe_allow_html=True)
+                st.caption(
+                    f"Sorted by edge = model% − market%. **BET** clears fair odds with cushion, "
+                    f"**THIN** is marginal, **SKIP** is overpriced. {matched}/{field} runners priced. "
+                    f"These are indicative forecast prices — re-check the board before staking."
+                )
+
             st.markdown(ui.section_label(f"Full field · {field} runners"), unsafe_allow_html=True)
             st.markdown(ui.runner_rows(entries), unsafe_allow_html=True)
             st.caption("🔥 strong recent gallops · ⚠️ concerning work · 🔗 owner ties to race sponsor")
