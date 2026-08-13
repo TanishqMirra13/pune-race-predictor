@@ -55,32 +55,29 @@ SCRAPER_BY_VENUE = {
     "Delhi": indiarace_cards.ForVenue("Delhi"),
 }
 
-# auto_feed: can a price be fetched automatically (NZ TAB for AU, HKJC for HK)?
+# Every circuit now has BOTH an automatic price feed (indiarace for India,
+# NZ TAB for Australia, HKJC for Hong Kong) and the manual paste path, so
+# there is no longer a capability flag here -- the per-circuit fetch buttons
+# in the Odds tab are just keyed off the circuit name.
 #
-# It is deliberately NOT "does a market exist". India has no automatic feed --
-# no club or portal publishes a machine-readable pre-race price, and
-# indiarace's odds page currently serves empty tables -- but a price plainly
-# does exist, on the tote board at the track and on whatever exchange or book
-# the user holds an account with. India used to be locked out of the Odds and
-# Parlay tabs on a has_market=False flag, which meant somebody looking straight
-# at a live price had no way to get it into the model. Typing that price in is
-# a perfectly legitimate route to a real number, so every circuit can now reach
-# the paste path; only the automatic fetch buttons are circuit-specific.
+# India's feed is the weakest of the three, in two ways measured rather than
+# assumed (Aug 2026): its prices are INDICATIVE FORECASTS rather than a live
+# board, and they are only published on RACE DAY -- the same Kolkata card
+# returned 0 priced runners at 09:36 IST and 31 at 15:31 IST. The Odds tab
+# says both things plainly, so an empty fetch reads as "too early" rather
+# than "broken", and a pasted board price always overrides a forecast.
 CIRCUITS = {
     "India": {
         "venues": ["Pune", "Mumbai", "Bangalore", "Hyderabad", "Mysore", "Kolkata", "Delhi"],
-        "auto_feed": False,
-        "note": "No automatic Indian price feed -- paste prices from the tote board or your "
-                "exchange in the Odds tab to unlock value ranking and EV.",
+        "note": "indiarace posts forecast prices for all Indian venues on race day -- fetch or "
+                "paste them in the Odds tab to unlock value ranking and EV.",
     },
     "Australia": {
         "venues": [],  # discovered from Racing Australia's calendar per date
-        "auto_feed": True,
         "note": "Racing Australia publishes fields, ratings, form and starting prices. Races every day of the year.",
     },
     "Hong Kong": {
         "venues": ["Happy Valley", "Sha Tin"],
-        "auto_feed": True,
         "note": "HKJC publishes everything, but only in season (September to mid-July).",
     },
 }
@@ -1063,14 +1060,69 @@ with tab_odds:
     if not slate:
         st.info("Load a meeting first (sidebar).")
     else:
-        if not CIRCUITS[circuit]["auto_feed"]:
-            st.info(
-                "**No automatic price feed for India** -- no club or portal publishes a "
-                "machine-readable pre-race price (indiarace has an odds page, but it is "
-                "currently serving empty tables). The board price is real all the same, so "
-                "paste it in below and everything downstream -- value ranking, EV, the "
-                "parlay engine -- starts working for India too."
+        if circuit == "India":
+            st.markdown("#### Fetch forecast prices (indiarace)")
+            st.caption(
+                "indiarace publishes Night / Morning / Opening forecast prices for every "
+                "Indian venue. This pulls them for **every meeting loaded on this date** and "
+                "stores them, so the value ranking on the Race Day tab starts working. "
+                "**They are indicative forecasts, not the live tote board** -- use them to "
+                "find races worth a look, then confirm the number on the board before staking. "
+                "Anything you paste below overrides them."
             )
+            st.caption(
+                "⏰ These populate **on race day**, not the night before -- a card two days "
+                "out will legitimately return nothing."
+            )
+            st.caption(
+                "⚠️ **This feed alone will not unlock EV or parlays.** Measured on a real "
+                "Kolkata card: indiarace prices only the front 4-5 runners, i.e. 42-62% of "
+                "each field, and the engine needs 80% before it will trust a book. That guard "
+                "is right -- de-vigging a partial book invents an edge rather than removing a "
+                "margin. To get EV, paste a full set of prices below."
+            )
+            india_venues = sorted({r["venue"] for r in slate})
+            if st.button(f"Fetch indiarace odds for {len(india_venues)} loaded meeting(s)",
+                         use_container_width=True, key="fetch_india_odds"):
+                from scrapers import indiarace as ir
+                total, empty_venues = 0, []
+                for v in india_venues:
+                    try:
+                        raw = ir.fetch_odds_html(v, date_str, use_cache=False)
+                        if not raw:
+                            st.write(f"**{v}** -- no odds feed for this venue")
+                            continue
+                        odds_map = ir.parse_odds(raw)
+                        if not odds_map:
+                            empty_venues.append(v)
+                            continue
+                        # The odds page carries no race numbers, so the race a
+                        # price belongs to comes from the card we already hold.
+                        field_by_race = {}
+                        for r in slate:
+                            if r["venue"] != v:
+                                continue
+                            field_by_race[r["race_no"]] = [e["horse_name"] for e in r["entries"]]
+                        rows = ir.to_market_rows(odds_map, field_by_race)
+                        res = store_market_odds(conn, date_str, v, rows, source="indiarace")
+                        total += res["matched"]
+                        st.write(f"**{v}** -- priced {res['matched']} runners "
+                                 f"({len(odds_map)} on the page)")
+                        if res["unmatched"]:
+                            st.caption(f"{len(res['unmatched'])} name(s) on the odds page "
+                                       f"didn't match the loaded field -- usually late scratchings.")
+                    except Exception as e:
+                        st.error(f"{v}: {e}")
+                if empty_venues:
+                    st.warning(
+                        f"No prices posted yet for {', '.join(empty_venues)}. indiarace fills "
+                        f"this feed on race-day morning, so try again closer to the first race."
+                    )
+                if total:
+                    st.success(f"Stored forecast prices for {total} runners.")
+                    st.rerun()
+            st.divider()
+
         priced = sum(1 for r in slate if r["odds"])
         st.caption(
             f"{priced} of {len(slate)} loaded races have prices. Every race without a price is "
@@ -1131,12 +1183,13 @@ with tab_odds:
             "them here, one runner per line. Recognised shapes: `MAGIC MOMENT 3.40`, "
             "`7. Magic Moment $3.40 $1.55`, `Magic Moment 5/2`. Header and junk lines are ignored."
         )
-        if not CIRCUITS[circuit]["auto_feed"]:
+        if circuit == "India":
             st.caption(
-                "**Exchange prices:** paste the BACK price (the one you can bet at). Exchange "
-                "prices are usually the sharpest number available -- much thinner margin than a "
-                "bookmaker -- so they make a better benchmark than a tote board. Paste them as "
-                "close to the off as you can: a price from three hours ago is a different race."
+                "**Exchange or board prices beat the indiarace forecast above.** Paste the BACK "
+                "price (the one you can actually bet at); an exchange has a much thinner margin "
+                "than a tote, so it is a sharper estimate of true chance. A pasted price "
+                "overrides the fetched forecast for that runner. Paste as close to the off as "
+                "you can -- a price from three hours ago is a different race."
             )
         race_options = {f"{r['venue']} R{r['race_no']} -- {r['race_name'] or ''}"[:60]: r for r in slate}
         pick = st.selectbox("Race", list(race_options))
@@ -1225,9 +1278,10 @@ with tab_parlay:
     if not any(r["odds"] for r in slate):
         st.info(
             "Parlays need a price to test against, and no race on this slate has one yet. "
-            + ("Paste prices in the **Odds** tab -- India has no automatic feed, but a pasted "
-               "board or exchange price works exactly the same downstream."
-               if not CIRCUITS[circuit]["auto_feed"] else
+            + ("Fetch the indiarace forecast prices in the **Odds** tab, or paste a board or "
+               "exchange price -- either works the same downstream. Note that indiarace only "
+               "posts these on race day."
+               if circuit == "India" else
                "Load prices in the **Odds** tab first.")
         )
     else:

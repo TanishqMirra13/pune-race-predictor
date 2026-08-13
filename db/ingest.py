@@ -346,18 +346,21 @@ def store_market_odds(conn: sqlite3.Connection, race_date: str, venue: str,
 
 
 def load_market_odds(conn: sqlite3.Connection, race_id: int,
-                     prefer: tuple = ("manual", "api", "live", "tabnz", "sp")) -> dict:
+                     prefer: tuple = ("manual", "api", "live", "tabnz", "indiarace", "sp")) -> dict:
     """{HORSE NAME: {'win': d, 'place': d}} for one race.
 
     Sources are tried in preference order, and the order encodes whose price
     you can actually get on: 'manual' is what you saw at your own book, 'api'
     your configured book, 'live' HKJC's official odds, 'tabnz' NZ TAB used as
-    a proxy for the Australian market, and 'sp' a settled starting price.
+    a proxy for the Australian market, 'indiarace' indiarace.com's forecast
+    prices for the Indian circuit, and 'sp' a settled starting price.
     'sp' ranks last because it cannot be bet -- by the time it exists the race
     has run -- so treating it as a live quote would invent an opportunity that
     never existed. 'tabnz' ranks below anything you sourced yourself for the
     same reason in miniature: it is a real price, but not necessarily one your
-    bookmaker is offering."""
+    bookmaker is offering. 'indiarace' ranks below tabnz because it is weaker
+    still: an INDICATIVE forecast price rather than a live board, so it is
+    good for finding races worth a look and poor for deciding a stake."""
     rows = conn.execute(
         """SELECT h.name, mo.market, mo.source, mo.decimal_odds
            FROM market_odds mo JOIN horses h ON h.id = mo.horse_id

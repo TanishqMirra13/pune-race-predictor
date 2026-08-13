@@ -231,3 +231,38 @@ def parse_odds(html: str) -> dict[str, dict]:
                 "stages": stages,
             }
     return out
+
+
+# WHEN THE ODDS ACTUALLY EXIST (measured, Aug 2026): this feed is populated on
+# RACE DAY, not the night before. The same Kolkata meeting returned 0 priced
+# runners at 09:36 IST and 31 at 15:31 IST, and a Pune card two days out
+# returned 0. So an empty result usually means "too early", not "broken" --
+# which is why the UI says so rather than reporting a failure.
+
+def to_market_rows(odds_map: dict, field_by_race: dict) -> list[dict]:
+    """Map name-keyed odds onto race numbers, ready for store_market_odds().
+
+    field_by_race: {race_no: [horse names as loaded on our card]}. The odds
+    page carries no race numbers at all (see parse_odds), so the race a price
+    belongs to can only come from the card we already hold.
+
+    UNIT CONVERSION, and it matters: parse_odds returns ODDS-TO-ONE (4/1 ->
+    4.0) despite the 'odds_decimal' key name, because ui.implied_probability
+    expects that form. market_odds instead stores TRUE DECIMAL (4/1 -> 5.0),
+    which is what models/odds.implied_probability divides into 1. Storing
+    odds-to-one there would make a 4/1 shot read as 25% implied instead of
+    20%, inflating every edge the EV engine reports. Hence the +1.0 here.
+    """
+    rows = []
+    for race_no, horses in field_by_race.items():
+        for horse in horses:
+            info = odds_map.get((horse or "").strip().upper())
+            if not info or info.get("odds_decimal") is None:
+                continue
+            rows.append({
+                "race_no": race_no,
+                "horse_name": horse,
+                "win": info["odds_decimal"] + 1.0,   # odds-to-one -> decimal
+                "place": None,                       # this feed quotes win only
+            })
+    return rows
