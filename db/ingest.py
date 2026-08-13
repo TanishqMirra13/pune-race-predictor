@@ -4,6 +4,7 @@ Originally RWITC-only; now also carries the Australian and Hong Kong circuits,
 whose parsers deliberately emit the same shapes so the storage layer barely had
 to change. The genuinely new pieces are market_odds (there was no market to
 store before) and the parlay tables."""
+import json
 import sqlite3
 
 
@@ -76,17 +77,36 @@ def store_racecard(conn: sqlite3.Connection, race_date: str, venue: str, races: 
                     "UPDATE horses SET breeder=COALESCE(?, breeder), stud=COALESCE(?, stud) WHERE id=?",
                     (run.get("breeder"), run.get("stud"), horse_id),
                 )
+            if run.get("sire") or run.get("dam"):
+                conn.execute(
+                    "UPDATE horses SET sire=COALESCE(?, sire), dam=COALESCE(?, dam) WHERE id=?",
+                    (run.get("sire"), run.get("dam"), horse_id),
+                )
             recent_form = ",".join(
                 (rr.get("placing") or "?") for rr in run.get("recent_runs", [])
             )
+            # recent_form_text (bare placings, e.g. "2,1,4,?") is kept for
+            # backward compatibility -- recent_runs_json is the same data
+            # without the class/distance/date/time fields collapsed away,
+            # which models/rating_engine.py's distance/class-aware form
+            # scoring reads instead. Source richness varies: RWITC has all of
+            # it, indiarace-sourced venues have placings only, BTC has none.
+            recent_runs_json = json.dumps(run.get("recent_runs", []))
+            equipment_codes = ",".join(run.get("equipment_codes") or []) or None
             conn.execute(
-                """INSERT INTO runs (race_id, horse_id, jockey, trainer, owner, weight_kg, official_rating, recent_form_text)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """INSERT INTO runs (race_id, horse_id, jockey, trainer, owner, weight_kg, official_rating,
+                                      recent_form_text, apprentice_allowance, equipment_raw, equipment_codes,
+                                      assessed_rating, assessed_rating_date, recent_runs_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(race_id, horse_id) DO UPDATE SET
                        jockey=excluded.jockey, trainer=excluded.trainer, owner=excluded.owner, weight_kg=excluded.weight_kg,
-                       official_rating=excluded.official_rating, recent_form_text=excluded.recent_form_text""",
+                       official_rating=excluded.official_rating, recent_form_text=excluded.recent_form_text,
+                       apprentice_allowance=excluded.apprentice_allowance, equipment_raw=excluded.equipment_raw,
+                       equipment_codes=excluded.equipment_codes, assessed_rating=excluded.assessed_rating,
+                       assessed_rating_date=excluded.assessed_rating_date, recent_runs_json=excluded.recent_runs_json""",
                 (race_id, horse_id, run.get("jockey"), run.get("trainer"), run.get("owner"), run.get("weight_kg"),
-                 run.get("official_rating"), recent_form),
+                 run.get("official_rating"), recent_form, run.get("apprentice_allowance"), run.get("equipment_raw"),
+                 equipment_codes, run.get("assessed_rating"), run.get("assessed_rating_date"), recent_runs_json),
             )
     conn.commit()
 

@@ -55,6 +55,24 @@ def implied_probability(board_odds: float) -> float | None:
     return 1.0 / (board_odds + 1.0)
 
 
+def _move_chip(info: dict | None) -> str:
+    """Night->Opening price move, shown as context beside the model number.
+
+    Deliberately display-only: the move is not folded into the composite
+    score because it can't be backtested (indiarace serves only the current
+    odds page, with no historical archive of what the night price was) --
+    see models/odds_movement.py."""
+    if not info:
+        return ""
+    from models.odds_movement import movement
+    m = movement(info.get("stages"))
+    if not m["label"]:
+        return ""
+    cls = "pos" if m["direction"] == "shortening" else "neg"
+    arrow = "&darr;" if m["direction"] == "shortening" else "&uarr;"
+    return f' &middot; <span class="rp-{cls}">{arrow} {_esc(m["label"])}</span>'
+
+
 def value_rows(entries: list[dict], odds_map: dict, cushion: float = 0.25, limit: int = 10) -> str:
     """Runners ranked by VALUE (model edge over the market price), not by raw
     win chance. The likeliest horse and the profitable horse are different
@@ -97,7 +115,8 @@ def value_rows(entries: list[dict], odds_map: dict, cushion: float = 0.25, limit
             f'<div class="rp-id">'
             f'<div class="rp-name">{_esc(e.get("horse_name"))} '
             f'<span class="rp-badge rp-bg-{cls}">{s["verdict"]}</span></div>'
-            f'<div class="rp-meta">model {s["p"]*100:.0f}% &middot; {_esc(e.get("jockey") or "")}</div>'
+            f'<div class="rp-meta">model {s["p"]*100:.0f}% &middot; {_esc(e.get("jockey") or "")}'
+            f'{_move_chip(info)}</div>'
             f"</div>"
             f'<div class="rp-val">{right}</div>'
             f"</div>"

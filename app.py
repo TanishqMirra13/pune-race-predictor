@@ -13,6 +13,7 @@ from db.ingest import (
     store_raceresult,
 )
 from scrapers import rwitc, btc, hkjc, odds_import, tabnz, racingaustralia as ra
+from scrapers import indiarace_cards
 from models.rating_engine import compute_composite_scores
 from models import parlay as parlay_engine
 from models.betslip import (
@@ -39,29 +40,47 @@ inject_theme()
 init_db()
 conn = get_connection()
 
-# Both RWITC (Pune/Mumbai -- same site, auto-detects venue by date) and BTC
-# (Bangalore, separate site) expose the same fetch_racecard_html /
-# fetch_raceresult_html / parse_racecard / parse_raceresult interface, so
-# the rest of the app doesn't need to know which source it's talking to.
-SCRAPER_BY_VENUE = {"Pune": rwitc, "Mumbai": rwitc, "Bangalore": btc}
+# RWITC (Pune/Mumbai -- same site, auto-detects venue by date), BTC
+# (Bangalore, separate site), and indiarace_cards.ForVenue (Hyderabad/Mysore/
+# Kolkata/Delhi -- these four clubs have no scrapable racecard of their own;
+# see indiarace_cards.py's module docstring) all expose the same
+# fetch_racecard_html / fetch_raceresult_html / parse_racecard /
+# parse_raceresult interface, so the rest of the app doesn't need to know
+# which source it's talking to.
+SCRAPER_BY_VENUE = {
+    "Pune": rwitc, "Mumbai": rwitc, "Bangalore": btc,
+    "Hyderabad": indiarace_cards.ForVenue("Hyderabad"),
+    "Mysore": indiarace_cards.ForVenue("Mysore"),
+    "Kolkata": indiarace_cards.ForVenue("Kolkata"),
+    "Delhi": indiarace_cards.ForVenue("Delhi"),
+}
 
-# The three circuits differ in one way that matters more than any other: only
-# Australia and Hong Kong publish a market price, which is what makes expected
-# value -- and therefore the parlay engine -- possible at all.
+# auto_feed: can a price be fetched automatically (NZ TAB for AU, HKJC for HK)?
+#
+# It is deliberately NOT "does a market exist". India has no automatic feed --
+# no club or portal publishes a machine-readable pre-race price, and
+# indiarace's odds page currently serves empty tables -- but a price plainly
+# does exist, on the tote board at the track and on whatever exchange or book
+# the user holds an account with. India used to be locked out of the Odds and
+# Parlay tabs on a has_market=False flag, which meant somebody looking straight
+# at a live price had no way to get it into the model. Typing that price in is
+# a perfectly legitimate route to a real number, so every circuit can now reach
+# the paste path; only the automatic fetch buttons are circuit-specific.
 CIRCUITS = {
     "India": {
-        "venues": ["Pune", "Mumbai", "Bangalore"],
-        "has_market": False,
-        "note": "RWITC and BTC publish no pre-race odds, so India gets ranked picks but no EV or parlays.",
+        "venues": ["Pune", "Mumbai", "Bangalore", "Hyderabad", "Mysore", "Kolkata", "Delhi"],
+        "auto_feed": False,
+        "note": "No automatic Indian price feed -- paste prices from the tote board or your "
+                "exchange in the Odds tab to unlock value ranking and EV.",
     },
     "Australia": {
         "venues": [],  # discovered from Racing Australia's calendar per date
-        "has_market": True,
+        "auto_feed": True,
         "note": "Racing Australia publishes fields, ratings, form and starting prices. Races every day of the year.",
     },
     "Hong Kong": {
         "venues": ["Happy Valley", "Sha Tin"],
-        "has_market": True,
+        "auto_feed": True,
         "note": "HKJC publishes everything, but only in season (September to mid-July).",
     },
 }
@@ -873,7 +892,10 @@ with tab_backtest:
         "owner/breeder rates derive from this same archive, so connection signals are flattered by "
         "lookahead; rating, form, and favourite numbers are point-in-time clean."
     )
-    bt_venue = st.selectbox("Backtest venue", ["All venues", "Pune", "Mumbai", "Bangalore"])
+    bt_venue = st.selectbox(
+        "Backtest venue",
+        ["All venues", "Pune", "Mumbai", "Bangalore", "Hyderabad", "Mysore", "Kolkata", "Delhi"],
+    )
     if st.button("Run backtest"):
         from scripts.backtest import benchmark as bt_benchmark, calibration as bt_calibration, \
             load_backtest_races, signal_patterns
@@ -1038,15 +1060,17 @@ with tab_bankroll:
 # ===========================================================================
 with tab_odds:
     st.subheader("Market odds")
-    if not CIRCUITS[circuit]["has_market"]:
-        st.info(
-            "The Indian clubs publish no pre-race odds at all -- prices only appear after the "
-            "race, on the results page. That is why the India circuit has ranked picks but no "
-            "expected value and no parlays. Switch to Australia or Hong Kong to use those."
-        )
-    elif not slate:
+    if not slate:
         st.info("Load a meeting first (sidebar).")
     else:
+        if not CIRCUITS[circuit]["auto_feed"]:
+            st.info(
+                "**No automatic price feed for India** -- no club or portal publishes a "
+                "machine-readable pre-race price (indiarace has an odds page, but it is "
+                "currently serving empty tables). The board price is real all the same, so "
+                "paste it in below and everything downstream -- value ranking, EV, the "
+                "parlay engine -- starts working for India too."
+            )
         priced = sum(1 for r in slate if r["odds"])
         st.caption(
             f"{priced} of {len(slate)} loaded races have prices. Every race without a price is "
@@ -1102,10 +1126,18 @@ with tab_odds:
 
         st.markdown("#### Paste prices from your bookmaker")
         st.caption(
-            "The reliable path. Copy the win (and place, if shown) prices off any screen and paste "
-            "them here -- one runner per line. Recognised shapes: `MAGIC MOMENT 3.40`, "
+            "The reliable path, and the only one that works everywhere. Copy the win (and place, "
+            "if shown) prices off any screen -- tote board, exchange, bookmaker app -- and paste "
+            "them here, one runner per line. Recognised shapes: `MAGIC MOMENT 3.40`, "
             "`7. Magic Moment $3.40 $1.55`, `Magic Moment 5/2`. Header and junk lines are ignored."
         )
+        if not CIRCUITS[circuit]["auto_feed"]:
+            st.caption(
+                "**Exchange prices:** paste the BACK price (the one you can bet at). Exchange "
+                "prices are usually the sharpest number available -- much thinner margin than a "
+                "bookmaker -- so they make a better benchmark than a tote board. Paste them as "
+                "close to the off as you can: a price from three hours ago is a different race."
+            )
         race_options = {f"{r['venue']} R{r['race_no']} -- {r['race_name'] or ''}"[:60]: r for r in slate}
         pick = st.selectbox("Race", list(race_options))
         target = race_options[pick]
@@ -1190,10 +1222,13 @@ with tab_odds:
 with tab_parlay:
     st.subheader("Daily parlays")
 
-    if not CIRCUITS[circuit]["has_market"]:
+    if not any(r["odds"] for r in slate):
         st.info(
-            "Parlays need a price to test against, and the Indian clubs publish none pre-race. "
-            "Use the Australia or Hong Kong circuit."
+            "Parlays need a price to test against, and no race on this slate has one yet. "
+            + ("Paste prices in the **Odds** tab -- India has no automatic feed, but a pasted "
+               "board or exchange price works exactly the same downstream."
+               if not CIRCUITS[circuit]["auto_feed"] else
+               "Load prices in the **Odds** tab first.")
         )
     else:
         st.markdown(

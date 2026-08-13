@@ -243,6 +243,38 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "saddlecloth" not in run_cols:
         conn.execute("ALTER TABLE runs ADD COLUMN saddlecloth INTEGER")
 
+    # Added for the accuracy pass (Aug 2026): fields the scrapers were already
+    # parsing off the page but the ingest layer threw away before they ever
+    # reached the DB -- see models/rating_engine.py for how each is used.
+    # apprentice_allowance: claim in kg, so 'effective weight' = weight_kg -
+    #   apprentice_allowance can be computed without re-scraping anything.
+    # equipment_raw/equipment_codes: raw bracket string RWITC/indiarace print
+    #   (e.g. "[9] (TS)(CNB)(A)AFHH-") and the parenthesized codes pulled out
+    #   of it (e.g. "TS,CNB") -- kept both because the un-parenthesized tail
+    #   isn't confidently decoded (see rwitc.py's parser comment) and is
+    #   preserved raw rather than guessed at.
+    # assessed_rating/assessed_rating_date: RWITC prints "Rating: 31 (HRA 42
+    #   on 19/10/2025)" alongside the official running rating -- a gap here
+    #   (assessed above/below the current mark) is a real signal the current-
+    #   rating-only model was blind to. Source-specific: only RWITC exposes
+    #   this today, so it's null everywhere else.
+    # recent_runs_json: the full per-run history (date/class/distance/
+    #   jockey/weight/placing/time where the source provides it) that used to
+    #   get collapsed down to a bare placings string before storage. Source
+    #   richness varies -- RWITC has all of it, indiarace-sourced venues have
+    #   placings only, BTC has none (documented gap, unchanged) -- so this is
+    #   the raw JSON list and callers degrade gracefully field-by-field.
+    for col, decl in (
+        ("apprentice_allowance", "REAL"),
+        ("equipment_raw", "TEXT"),
+        ("equipment_codes", "TEXT"),
+        ("assessed_rating", "INTEGER"),
+        ("assessed_rating_date", "TEXT"),
+        ("recent_runs_json", "TEXT"),
+    ):
+        if col not in run_cols:
+            conn.execute(f"ALTER TABLE runs ADD COLUMN {col} {decl}")
+
     conn.execute("CREATE INDEX IF NOT EXISTS idx_races_date_circuit ON races(race_date, circuit)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_market_odds_race ON market_odds(race_id, market)")
 

@@ -8,16 +8,27 @@ Usage:
     python scripts/backtest.py --venue Pune
     python scripts/backtest.py --tune         # also grid-search weights
 
-HONESTY / LOOKAHEAD CAVEATS (read before trusting the numbers):
-- Official rating, recent form, and the tote favourite are point-in-time
-  clean: they were all knowable before each race ran.
-- Jockey/trainer strike rates use CURRENT season snapshots applied
-  retroactively, and owner/breeder rates are derived from the full results
-  archive INCLUDING the races being backtested. Both leak future information
-  into those signals, which flatters them. Treat the rating/form/favourite
-  numbers as solid and the connection-signal numbers as upper bounds.
-- ~55 race days is a small sample; differences of a few percentage points
-  are noise, not signal.
+HONESTY / LOOKAHEAD NOTES (read before trusting the numbers):
+- The lookahead leak that used to invalidate these numbers is FIXED (Aug
+  2026). Every race is now scored with as_of_date set to its own date, so
+  connection strike rates are rebuilt from results strictly BEFORE that race
+  -- see compute_composite_scores' docstring. Previously jockey/trainer used
+  a current-season snapshot and owner/breeder used the whole archive
+  including the race being graded, which inflated results badly wherever the
+  archive WAS the test set (Hyderabad read 75.7%; honestly scored it is
+  35.1%).
+- Live scoring deliberately still uses the official current-season snapshot,
+  because that genuinely is what a punter knows on race day. as_of_date only
+  applies to backtesting.
+- Sample size remains the binding constraint: ~500 races means the 95%
+  confidence interval on a hit rate is roughly +/-4pp. Differences smaller
+  than that are noise. Verified with a McNemar paired test when the Aug 2026
+  signal set was added: 24.7% -> 26.4% looked like an improvement but came
+  out chi-sq 1.36, well under the 3.84 needed for p<0.05.
+- Signals whose source data can't be reconstructed historically are
+  deliberately excluded from scoring rather than backtested dishonestly:
+  trackwork/mock races (no bulk archive) and odds movement (indiarace serves
+  only the current odds page).
 """
 import argparse
 import itertools
@@ -51,7 +62,9 @@ def load_backtest_races(conn, venue: str | None = None) -> list[dict]:
                WHERE r.race_id = ? AND res.finish_position = 1""",
             (row["id"],),
         ).fetchone()
-        entries = compute_composite_scores(conn, row["id"])
+        # as_of_date is what makes this an honest backtest rather than a
+        # measure of hindsight -- see compute_composite_scores' docstring.
+        entries = compute_composite_scores(conn, row["id"], as_of_date=row["race_date"])
         if not winner or len(entries) < 3:
             continue  # walkovers/tiny fields aren't informative
         races.append({
@@ -164,17 +177,30 @@ def avg_log_loss(races: list[dict], weights: dict, sharpness: float) -> float:
 def tune_weights(races: list[dict]) -> dict:
     """Coarse grid search minimizing average log-loss of the actual winner.
     Weights are relative (softmax normalizes), so we fix rating's grid around
-    its current value and vary the rest."""
+    its current value and vary the rest.
+
+    'context' covers the signals added in the Aug 2026 accuracy pass (weight
+    carried, freshness, course & distance, sire, rating gap) as a single
+    dial rather than five independent axes -- the full product would be
+    ~100x slower to search and the archive isn't big enough to fit five more
+    parameters independently without overfitting. Once more results accrue,
+    splitting them out is the natural next step."""
     grids = {
         "rating": [0.25, 0.35, 0.45, 0.55],
         "form": [0.05, 0.15, 0.25],
         "connections": [0.10, 0.25, 0.40],  # split evenly across jockey/trainer/owner/breeder
+        "context": [0.0, 0.15, 0.30],       # split across the new form.py signals
         "sharpness": [2.0, 3.0, 4.0, 5.0],
     }
     best = None
-    for r, f, c, k in itertools.product(grids["rating"], grids["form"], grids["connections"], grids["sharpness"]):
+    for r, f, c, ctx, k in itertools.product(
+        grids["rating"], grids["form"], grids["connections"], grids["context"], grids["sharpness"]
+    ):
         w = {"rating": r, "form": f, "jockey": c / 4, "trainer": c / 4,
-             "owner": c / 4, "breeder": c / 4, "sponsor": 0.08}
+             "owner": c / 4, "breeder": c / 4, "sponsor": 0.08,
+             "weight": ctx / 5, "freshness": ctx / 5, "cd": ctx / 5,
+             "sire": ctx / 5, "rating_gap": ctx / 5,
+             "workout": 0.08, "equipment": 0.04}
         loss = avg_log_loss(races, w, k)
         hits = sum(
             max(race["entries"], key=lambda e: e["win_probability"])["horse_id"] == race["winner_horse_id"]
@@ -187,7 +213,10 @@ def tune_weights(races: list[dict]) -> dict:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--venue", choices=["Pune", "Mumbai", "Bangalore"])
+    parser.add_argument(
+        "--venue",
+        choices=["Pune", "Mumbai", "Bangalore", "Hyderabad", "Mysore", "Kolkata", "Delhi"],
+    )
     parser.add_argument("--tune", action="store_true")
     args = parser.parse_args()
 

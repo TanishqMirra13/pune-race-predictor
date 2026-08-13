@@ -4,6 +4,7 @@ Usage:
     python scripts/backfill.py --venue Bangalore --start 2026-06-28 --end 2026-07-12
     python scripts/backfill.py --venue Pune --start 2025-07-18 --end 2025-10-20
     python scripts/backfill.py --venue Mumbai --start 2025-11-01 --end 2026-04-30
+    python scripts/backfill.py --venue Hyderabad --start 2026-07-01 --end 2026-08-10
 
 Iterates every date in [start, end], fetching both the race card and the
 results for each date. Dates with no card/results (weekdays, off-season) are
@@ -20,9 +21,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from db.schema import get_connection, init_db
 from db.ingest import store_racecard, store_raceresult
-from scrapers import rwitc, btc
+from scrapers import rwitc, btc, indiarace_cards
 
-SCRAPER_BY_VENUE = {"Pune": rwitc, "Mumbai": rwitc, "Bangalore": btc}
+# Hyderabad/Mysore/Kolkata/Delhi have no scrapable club site of their own --
+# see indiarace_cards.py's module docstring -- so they go through indiarace's
+# unified racing-center pages instead of a dedicated per-club scraper.
+SCRAPER_BY_VENUE = {
+    "Pune": rwitc, "Mumbai": rwitc, "Bangalore": btc,
+    "Hyderabad": indiarace_cards.ForVenue("Hyderabad"),
+    "Mysore": indiarace_cards.ForVenue("Mysore"),
+    "Kolkata": indiarace_cards.ForVenue("Kolkata"),
+    "Delhi": indiarace_cards.ForVenue("Delhi"),
+}
 
 
 def daterange(start: date, end: date):

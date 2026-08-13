@@ -4,9 +4,12 @@ Verified endpoints (Jul 2026):
 - https://www.indiarace.com/Home/allTrackworkData/{venueId}      -> JSON list of dates
 - https://www.indiarace.com/Home/trackWorkByVenueAndDate/{venueId}/{YYYY-MM-DD}
 
-Venue ids probed live: Pune=10, Bangalore=3 (Mysore=8, Hyderabad=11 unused
-here). Mumbai has no id with data -- RWITC horses do their monsoon trackwork
-at Pune anyway, so Mumbai maps to None and callers skip gracefully.
+Venue ids (cross-checked against the venueName each allTrackworkData/{id}
+response embeds, and against indiarace's own Home/allRaceFixturesData feed,
+when Hyderabad/Mysore/Kolkata/Delhi were wired in, Aug 2026): Pune=10,
+Bangalore=3, Mysore=8, Hyderabad=11, Kolkata=1, Delhi=7. Mumbai has no id
+with trackwork data -- RWITC horses do their monsoon trackwork at Pune
+anyway, so Mumbai maps to None and callers skip gracefully.
 
 Page structure: one <table> per workout distance (600M/800M/...). Each row:
 [rating(s)] [age(s)] [<b>Name</b> (Rider) x1-2 separated by <br>]
@@ -33,12 +36,17 @@ ODDS_URL = (
 
 # Trackwork venue ids. Mumbai is None: indiarace publishes no Mumbai trackwork
 # feed (RWITC horses do their monsoon work at Pune), so callers skip it.
-VENUE_IDS = {"Pune": 10, "Bangalore": 3, "Mumbai": None}
+VENUE_IDS = {
+    "Pune": 10, "Bangalore": 3, "Mumbai": None,
+    "Mysore": 8, "Hyderabad": 11, "Kolkata": 1, "Delhi": 7,
+}
 
 # Odds venue ids -- kept separate from VENUE_IDS because the two feeds don't
 # cover the same venues. Only ids verified to return a real odds table belong
 # here; an unverified guess would silently show another venue's prices.
-ODDS_VENUE_IDS = {"Pune": 10, "Bangalore": 3}
+ODDS_VENUE_IDS = {
+    "Pune": 10, "Bangalore": 3, "Mysore": 8, "Hyderabad": 11, "Kolkata": 1, "Delhi": 7,
+}
 
 CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "cache"
 
@@ -202,6 +210,17 @@ def parse_odds(html: str) -> dict[str, dict]:
             dec = _frac_to_decimal(best_raw) if best_raw else None
             if dec is None:
                 continue
+            # All three stages are kept, not just the freshest, so the
+            # direction of the move is recoverable. A horse going 8/1 (night)
+            # -> 3/1 (opening) is being backed hard, and that shortening is
+            # information the model has no other way to see -- see
+            # models/odds_movement.py. Previously the two older columns were
+            # parsed and then thrown away.
+            stages = {}
+            for label, raw in (("night", night), ("morning", morning), ("opening", opening)):
+                d = _frac_to_decimal(raw.strip()) if raw and raw.strip() else None
+                if d is not None:
+                    stages[label] = d
             out[name.strip().upper()] = {
                 "horse_name": name.strip(),
                 "card_no": int(card_no) if card_no else None,
@@ -209,5 +228,6 @@ def parse_odds(html: str) -> dict[str, dict]:
                 "odds_fraction": best_raw,
                 "odds_decimal": dec,
                 "odds_stage": best_label,
+                "stages": stages,
             }
     return out

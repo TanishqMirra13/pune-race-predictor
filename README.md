@@ -1,8 +1,9 @@
 # Race Predictor -- India / Australia / Hong Kong
 
 A local tool for entertainment analysis of horse racing across three circuits:
-India (Pune and Mumbai via RWITC, Bangalore via BTC), Australia (Racing
-Australia), and Hong Kong (HKJC). Enter a day's budget and goal, get a ranked,
+India (Pune and Mumbai via RWITC, Bangalore via BTC, and Hyderabad/Mysore/
+Kolkata/Delhi via indiarace.com), Australia (Racing Australia), and Hong Kong
+(HKJC). Enter a day's budget and goal, get a ranked,
 reasoned shortlist per race and a staking plan that respects that budget.
 **Not a winner-picker** -- horse racing is genuinely unpredictable. See the
 Bankroll & Calibration tab for an honest, ongoing record of how the model's
@@ -11,17 +12,30 @@ confidence has actually tracked outcomes.
 The three circuits are not equivalent, and the difference decides what the
 tool can honestly do on each:
 
-| | Fields & form | Official rating | Pre-race odds | EV & parlays |
-|---|---|---|---|---|
-| **India** | yes | yes | **no** | no |
-| **Australia** | yes | yes | manual paste | yes |
-| **Hong Kong** | in season | yes | yes (live) | yes |
+| | Fields & form | Official rating | Automatic price feed | Pre-race odds | EV & parlays |
+|---|---|---|---|---|---|
+| **India** | yes | yes | **no** | manual paste | yes, once pasted |
+| **Australia** | yes | yes | yes (NZ TAB) | auto + paste | yes |
+| **Hong Kong** | in season | yes | yes (HKJC) | auto + paste | yes |
 
-The Indian clubs publish no pre-race odds at all -- prices appear only after
-the race, on the results page. Without a market price there is nothing to
-measure an edge against, so the India circuit gets ranked picks and a staking
-plan but no expected value and no parlays. That is a limitation of the data,
-not of the model.
+**No Indian source publishes a machine-readable pre-race price.** The clubs
+print prices only after the race, on the results page; indiarace has an odds
+page but it currently serves empty tables (verified Aug 2026 across Kolkata,
+Pune and Hyderabad meetings). So there is no automatic Indian feed, and there
+may never be one.
+
+A price still *exists*, though -- on the tote board at the track, and on
+whatever exchange or book you hold an account with. Since Aug 2026 the India
+circuit is no longer locked out of the Odds tab: paste that price in and
+everything downstream (value ranking, expected value, the parlay engine)
+works exactly as it does for Australia. The limitation is the *feed*, not the
+maths.
+
+Exchange back-prices are the best thing to paste -- much thinner margin than
+a bookmaker or a tote, so they are a sharper estimate of true probability.
+Paste them as close to the off as you can; the app flags a price older than
+90 minutes as stale, because an edge measured against a stale price is
+fiction.
 
 ## Read this before betting a parlay
 
@@ -260,15 +274,19 @@ range in one go:
 python scripts/backfill.py --venue Bangalore --start 2026-06-13 --end 2026-07-12
 python scripts/backfill.py --venue Mumbai --start 2025-11-01 --end 2026-04-30
 python scripts/backfill.py --venue Pune --start 2025-07-18 --end 2025-10-20
+python scripts/backfill.py --venue Hyderabad --start 2026-07-01 --end 2026-08-10
 ```
 
-It fetches both the race card and results for every date in range, skips
-non-race days silently (that's normal -- Pune/Mumbai/Bangalore only race a
-few days a week), and caches each page under `data/cache/` so re-runs don't
-re-hit the server. Already run once for Bangalore's current season-to-date
-(10 real race days as of 2026-07-12) and Mumbai's just-completed 2025/26
-season (Nov 2025 -- Apr 2026) as a starting dataset to test against -- Mumbai
-racing itself doesn't resume live until November 2026.
+Works the same way for Hyderabad, Mysore, Kolkata and Delhi (via
+`scrapers/indiarace_cards.py`) as it does for the RWITC/BTC venues -- same
+`--venue` flag, same date-range behavior. It fetches both the race card and
+results for every date in range, skips non-race days silently (that's normal
+-- every Indian venue only races a few days a week, and several of these run
+seasonally rather than year-round), and caches each page under `data/cache/`
+so re-runs don't re-hit the server. Already run once for Bangalore's current
+season-to-date (10 real race days as of 2026-07-12) and Mumbai's
+just-completed 2025/26 season (Nov 2025 -- Apr 2026) as a starting dataset to
+test against -- Mumbai racing itself doesn't resume live until November 2026.
 
 ## Data sources
 
@@ -284,6 +302,20 @@ racing itself doesn't resume live until November 2026.
   form as letter codes rather than numeric placings (left blank rather than
   guessed), and its results table doesn't list a per-runner trainer (only
   the race winner's).
+- **Hyderabad, Mysore, Kolkata & Delhi (indiarace.com, `scrapers/indiarace_cards.py`):**
+  these four clubs don't have a scrapable racecard of their own -- Hyderabad
+  Race Club's site has no plain HTML racecard route, Mysore Race Club's
+  `/Racecard` and `/Results` routes 404 without params only its own JS
+  supplies, Royal Calcutta Turf Club gates racing data behind a separate
+  login (rctclive.in), and Delhi Race Club publishes entries/results as PDFs
+  only. indiarace.com -- already used for trackwork and pre-race odds --
+  turns out to carry a full racecard/result page for every club at
+  `Home/racingCenterEvent?venueId={id}&event_date=YYYY-MM-DD&race_type=RACECARD|RESULT`,
+  so these four venues go through that instead. Two gaps vs. RWITC/BTC:
+  breeder/stud/foaled date aren't broken out (only age/colour/sex as one
+  string), and "Last 5 runs" order is assumed newest-first (matching
+  RWITC/BTC and the model's recency weighting) rather than independently
+  verified the way the Racing Australia reversal below was.
 - `standard_timings.pdf` (`data/standard_timings.pdf`, RWITC only so far)
   -- par times by class and distance, for Phase 2 speed figures. Currently a
   2011-dated file (the most recent RWITC has published at a stable URL);
@@ -416,32 +448,79 @@ race with results and benchmarks the model's top pick against the **tote
 favourite** (the betting public's collective prediction -- the strongest
 verifiable benchmark, since racingpulse's selections are paywalled and free
 tip blogs keep no checkable archive), the top-rated horse, and a random
-pick. Also shown in the app's **Backtest** tab. Findings on 401 races
-(favourites/odds parsed from both clubs' results pages; BTC's "Tote Fav"
-card number resolved to a horse name -- an earlier bug that conflated it
-with the winner is fixed):
+pick. Also shown in the app's **Backtest** tab.
 
-- Tote favourite 48.4%, model top pick 41.9% (top-3 75.6%), top-rated horse
-  25.4%, random 12.7%.
-- **Market-agreement pattern:** model pick == favourite -> won 63.9%; model
-  disagreed with market -> model 24.0% vs favourite 35.7%. When the live
-  odds board disagrees with the model, the market has historically been
-  right -- size down or skip.
-- Weights were re-tuned by grid search minimizing winner log-loss (same
-  config won on Pune alone and all venues pooled): rating 0.35->0.25, form
-  0.15->0.25, connections 0.48->0.40 total, softmax sharpness 3->5. Lifted
-  backtested top-pick hit rate ~1.5-2pp and improved calibration.
-- Caveats: jockey/trainer stats are current-season snapshots applied
-  retroactively and owner/breeder rates derive from the same archive being
-  tested (lookahead flatters connection signals); rating/form/favourite
-  numbers are point-in-time clean. Rerun after each race weekend.
+### The lookahead leak (fixed Aug 2026) -- and why the numbers dropped
+
+Earlier versions of this section reported a model top-pick rate of ~42%.
+**That number was inflated by a lookahead bug and is not real.** Jockey and
+trainer strike rates came from a current-season snapshot applied
+retroactively, and owner/breeder rates were derived from the whole results
+archive *including the very race being graded*. Every race was effectively
+scored using its own outcome.
+
+It was caught when four new venues were added: Hyderabad backtested at a
+nonsensical **75.7%** top-pick win rate. No handicapping model wins three
+races in four. The tell was that for Hyderabad the entire archive *was* the
+test set, so the leak dominated rather than being diluted across a season.
+
+`compute_composite_scores(..., as_of_date=...)` now rebuilds every derived
+signal from results strictly before the race being scored. Live scoring still
+uses the official current-season snapshot, which is correct -- that genuinely
+is what a punter knows on race day.
+
+### Honest numbers (511 races, leak-free)
+
+| | Top pick | Top-3 | |
+|---|---:|---:|---|
+| **Tote favourite** | **48.5%** | -- | the benchmark to beat |
+| Model top pick | 26.8% | 59.6% | |
+| Top-rated horse | 22.1% | -- | |
+| Random | 12.3% | -- | |
+
+Per venue: Pune 28.2%, Mumbai 24.9%, Bangalore 23.9%, Hyderabad 35.1%,
+Mysore 28.0%, Kolkata 28.6% (only 7 races -- ignore it).
+
+**The model does not beat the market on any Indian circuit.** That is the
+honest headline, and it is the same conclusion the market-agreement pattern
+has always pointed at: when the model agrees with the favourite it wins 54%
+of the time; when it disagrees it wins 11% while the favourite still wins
+45%. If the board disagrees with the pick here, trust the board.
+
+### On the Aug 2026 signal additions
+
+Weight carried, distance/class-aware form, days-since-run, course &
+distance, sire strike rate, rating gap and equipment change were all added
+in one pass (see `models/form.py`). Measured effect: **24.7% -> 26.4%**,
+which a McNemar paired test rates **not statistically significant**
+(chi-sq 1.36, needs >3.84 for p<0.05). A grid search found no better weight
+configuration. They are kept because they're cheap, principled, and should
+help as data grows -- but they are not a proven improvement, and this README
+will not claim they are.
+
+With ~500 races the 95% confidence interval on any hit rate is about
++/-4pp, which is wider than every effect measured in that pass. **Sample
+size, not signal count, is now the binding constraint.**
 
 ## Phase 2 (as the season's data accumulates)
 
-- Backfill results across the season to calibrate real speed figures (time
-  vs. par, adjusted for weight/going) instead of relying on rating alone.
+Ordered by expected value now that the leak is fixed and the cheap signals
+are in. The honest lesson from the Aug 2026 pass is that **adding more
+features to ~500 races doesn't move the needle** -- the top two items below
+are about sample size and objective measurement, not more features.
+
+- **More archived races.** Every effect worth chasing is currently smaller
+  than the +/-4pp confidence interval. Backfilling more seasons is the single
+  highest-value action available, and it's just runtime.
+- **Real speed figures** (time vs. par, adjusted for weight/going).
+  `data/standard_timings.pdf` is already parsed but never used to build one;
+  `runs.recent_runs_json` now preserves the per-run times needed. This is the
+  biggest untapped signal, because it's an objective performance measure
+  rather than the handicapper's opinion.
 - Jockey-trainer *combo* strike rates (currently scored independently), draw
   bias, going bias.
+- Rolling 30-day trainer/jockey form instead of season-to-date, to catch
+  hot/cold streaks the season average smooths away.
 - racingpulse.in / indiarace.com as secondary sources if useful gaps remain.
 - Calibration dashboard (already scaffolded in the Bankroll tab) will start
   producing meaningful numbers once enough bets are logged with outcomes.
@@ -451,8 +530,12 @@ with the winner is fixed):
 
 ## Known limitations
 
-- **India only:** no pre-race market odds available from either site --
-  staking is confidence-tiered, not true expected-value.
+- **India:** no automatic price feed exists, so EV is only as current as the
+  last price you pasted. With nothing pasted, staking falls back to
+  confidence-tiered rather than true expected-value. Note also that Indian
+  tote takeout is far heavier than an Australian book -- the engine puts a
+  three-leg India multi at roughly **49%** to takeout, which is why almost
+  nothing clears the margin test on that circuit.
 - **Australia:** live prices come from NZ TAB, which is a *different book* from
   wherever you place bets. An edge measured against NZ TAB's price is not an
   edge at your bookmaker unless their price is as long -- always confirm before

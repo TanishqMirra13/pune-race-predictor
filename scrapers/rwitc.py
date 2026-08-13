@@ -30,7 +30,21 @@ CLASS_RE = re.compile(r"Class\s+([IVX]+)")
 RATED_RANGE_RE = re.compile(r"rated\s+(\d+)\s+to\s+(\d+)", re.I)
 RATED_UPWARD_RE = re.compile(r"rated\s+(\d+)\s+and\s+upward", re.I)
 RATING_RE = re.compile(r"Rating:\s*(-{1,2}|\d+)")
+# RWITC prints the current running rating alongside a periodic reassessment,
+# e.g. "Rating: 31 (HRA 42 on 19/10/2025)" -- a gap here (assessed well above
+# or below the current mark) is real signal a rating-only model can't see.
+# "HRA" isn't spelled out anywhere on the site; the field is stored under
+# that name because that's literally what's printed, not because the
+# abbreviation is confidently decoded.
+HRA_RE = re.compile(r"HRA\s+(\d+)\s+on\s+(\d{2}/\d{2}/\d{4})")
 AGE_SEX_RE = re.compile(r"\d+\s*yrs\.?$", re.I)
+# Equipment line, e.g. "[9] (TS)(CNB)(A)AFHH-": a run of parenthesized codes
+# (TS/CNB/BLK/VISOR/HOOD/EP/A/...) followed by an un-parenthesized letter
+# cluster whose meaning isn't documented anywhere RWITC publishes. The coded
+# part is parsed into equipment_codes; the letter cluster is kept only in
+# equipment_raw rather than guessed at.
+EQUIPMENT_LINE_RE = re.compile(r"^\[\d+\]\s*((?:\([A-Z]+\))+)")
+EQUIPMENT_CODE_RE = re.compile(r"\(([A-Z]+)\)")
 
 
 def _get(url: str) -> str:
@@ -266,20 +280,28 @@ def _parse_horse_block(block: list[str]) -> dict | None:
         jockey = jockey_raw[:am.start()].strip()
 
     rating = None
+    assessed_rating = None
+    assessed_rating_date = None
     trainer = None
     foaled = None
     owner = None
     stud = None
     breeder = None
+    stud_idx = None
     for i, l in enumerate(block):
         if l.startswith("Rating:"):
             rm = RATING_RE.search(l)
             if rm and rm.group(1).isdigit():
                 rating = int(rm.group(1))
+            hm = HRA_RE.search(l)
+            if hm:
+                assessed_rating = int(hm.group(1))
+                assessed_rating_date = hm.group(2)
         elif l.startswith("Foaled:"):
             foaled = l.replace("Foaled:", "").strip()
         elif l.startswith("Stud:"):
             stud = l.replace("Stud:", "").strip() or None
+            stud_idx = i
         elif l.startswith("Breeder:"):
             breeder = l.replace("Breeder:", "").strip() or None
         elif AGE_SEX_RE.search(l):
@@ -288,6 +310,23 @@ def _parse_horse_block(block: list[str]) -> dict | None:
                 trainer = block[i + 1][1:-1]
             if i - 1 >= 0:
                 owner = re.sub(r"'s$", "", block[i - 1]).strip()
+
+    # Sire/dam/equipment have no distinctive prefix to search for like
+    # "Stud:" does, but they consistently sit immediately before it (verified
+    # across ~50 horses on live racecards, Aug 2026): sire, dam, equipment,
+    # then "Stud:". Anchoring on stud_idx survives the jockey/name fields
+    # varying in length instead of hard-coding absolute positions.
+    sire = dam = equipment_raw = None
+    equipment_codes: list[str] = []
+    if stud_idx is not None and stud_idx >= 3:
+        sire_line, dam_line, equip_line = block[stud_idx - 3], block[stud_idx - 2], block[stud_idx - 1]
+        if sire_line.endswith("-"):
+            sire = sire_line[:-1].strip() or None
+            dam = dam_line.strip() or None
+        em = EQUIPMENT_LINE_RE.match(equip_line)
+        if em:
+            equipment_raw = equip_line
+            equipment_codes = EQUIPMENT_CODE_RE.findall(em.group(1))
 
     view_runs_idx = next((i for i, l in enumerate(block) if l == "View Runs"), None)
     recent_runs = []
@@ -308,7 +347,13 @@ def _parse_horse_block(block: list[str]) -> dict | None:
         "owner": owner,
         "stud": stud,
         "breeder": breeder,
+        "sire": sire,
+        "dam": dam,
+        "equipment_raw": equipment_raw,
+        "equipment_codes": equipment_codes,
         "official_rating": rating,
+        "assessed_rating": assessed_rating,
+        "assessed_rating_date": assessed_rating_date,
         "foaled": foaled,
         "recent_runs": recent_runs,
     }
