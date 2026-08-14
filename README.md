@@ -113,7 +113,31 @@ python -m scripts.daily --circuit "Hong Kong"
 python -m scripts.daily --settle 2026-07-30         # grade yesterday's slips
 python -m scripts.daily --results 2026-07-30        # pull results + starting prices
 python -m scripts.daily --backfill 21               # archive 3 weeks of results
+python -m scripts.daily --snapshot                  # record today's Indian prices
 ```
+
+### The India race-day habit (two commands, ~10 seconds)
+
+This is the one routine worth adding, because it collects data that does not
+otherwise exist anywhere:
+
+```
+python -m scripts.daily --snapshot                  # during the day, before racing
+python -m scripts.daily --results 2026-08-13        # after racing
+python -m scripts.daily --snapshot 2026-08-13       # again: settles the SPs
+python scripts/early_price.py                       # the report, once data accrues
+```
+
+**Why it matters.** Every accuracy figure in this project benchmarks the model
+against the *final* starting price — the sharpest number in racing, containing
+all the late money. The model loses to it badly, but so does almost every
+model, and that is not the question that decides whether betting it makes
+money. The question that decides that is whether the model beats the price
+that was **on offer when you would actually have bet**. Nobody archives Indian
+forecast prices, so that has never been answerable. `--snapshot` starts
+building the record; `scripts/early_price.py` reports it and deliberately
+**refuses to give a verdict under 30 races**, because a noisy number that
+looks like an edge is worse than no number.
 
 Morning: it settles yesterday, loads today's fields, ranks the strongest model
 opinions so you know which races are worth pricing up, and prints any multi

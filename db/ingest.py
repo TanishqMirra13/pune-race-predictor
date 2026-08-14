@@ -381,6 +381,87 @@ def load_market_odds(conn: sqlite3.Connection, race_id: int,
     return best
 
 
+def snapshot_odds(conn: sqlite3.Connection, race_date: str, venue: str,
+                  odds_map: dict, field_by_race: dict, source: str = "indiarace") -> dict:
+    """Record every quoted stage for a runner into odds_snapshots.
+
+    Unlike store_market_odds -- which keeps one current best quote per source
+    so the EV engine has a single number to price against -- this keeps the
+    whole night/morning/opening path, because the POINT is to compare an early
+    price against the settled one later. See the odds_snapshots comment in
+    db/schema.py for why that comparison is the open question.
+
+    odds_map: {UPPER NAME: {'stages': {'night': odds-to-one, ...}}} as
+    scrapers/indiarace.py's parse_odds returns it.
+    field_by_race: {race_no: [horse names on our card]} -- the odds page has
+    no race numbers, so the mapping comes from the card we hold.
+
+    Stage values are converted odds-to-one -> decimal here for the same reason
+    to_market_rows does it: everything stored is decimal, and mixing the two
+    silently corrupts every probability derived from it.
+    """
+    written, races_seen = 0, 0
+    for race_no, horses in (field_by_race or {}).items():
+        race = conn.execute(
+            "SELECT id FROM races WHERE race_date=? AND venue=? AND race_number=?",
+            (race_date, venue, race_no),
+        ).fetchone()
+        if not race:
+            continue
+        races_seen += 1
+        for horse in horses:
+            info = odds_map.get((horse or "").strip().upper())
+            if not info:
+                continue
+            hit = conn.execute(
+                """SELECT r.horse_id FROM runs r JOIN horses h ON h.id = r.horse_id
+                   WHERE r.race_id = ? AND UPPER(h.name) = UPPER(?)""",
+                (race["id"], horse.strip()),
+            ).fetchone()
+            if not hit:
+                continue
+            for stage, odds_to_one in (info.get("stages") or {}).items():
+                if odds_to_one is None:
+                    continue
+                conn.execute(
+                    """INSERT INTO odds_snapshots (race_id, horse_id, source, stage, decimal_odds)
+                       VALUES (?, ?, ?, ?, ?)
+                       ON CONFLICT(race_id, horse_id, source, stage) DO UPDATE SET
+                           decimal_odds=excluded.decimal_odds, captured_at=CURRENT_TIMESTAMP""",
+                    (race["id"], hit["horse_id"], source, stage, float(odds_to_one) + 1.0),
+                )
+                written += 1
+    conn.commit()
+    return {"stages_written": written, "races": races_seen}
+
+
+def snapshot_settle_sp(conn: sqlite3.Connection, race_date: str, venue: str | None = None) -> int:
+    """Copy settled starting prices into odds_snapshots as stage='sp'.
+
+    Run after results are loaded. This is what turns a pile of forecast quotes
+    into an answerable question: for each runner we then hold both the price
+    that was on offer early and the price it actually went off at."""
+    q = """SELECT r.race_id, r.horse_id, r.odds_sp FROM runs r
+           JOIN races ra ON ra.id = r.race_id
+           WHERE ra.race_date = ? AND r.odds_sp IS NOT NULL AND r.scratched = 0"""
+    params: list = [race_date]
+    if venue:
+        q += " AND ra.venue = ?"
+        params.append(venue)
+    n = 0
+    for row in conn.execute(q, params).fetchall():
+        conn.execute(
+            """INSERT INTO odds_snapshots (race_id, horse_id, source, stage, decimal_odds)
+               VALUES (?, ?, 'sp', 'sp', ?)
+               ON CONFLICT(race_id, horse_id, source, stage) DO UPDATE SET
+                   decimal_odds=excluded.decimal_odds, captured_at=CURRENT_TIMESTAMP""",
+            (row["race_id"], row["horse_id"], float(row["odds_sp"]) + 1.0),
+        )
+        n += 1
+    conn.commit()
+    return n
+
+
 def odds_age_minutes(conn: sqlite3.Connection, race_id: int,
                      exclude_sources: tuple = ("sp",)) -> float | None:
     """Age in minutes of the freshest bettable price stored for a race.

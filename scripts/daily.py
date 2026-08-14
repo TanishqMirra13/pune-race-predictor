@@ -277,6 +277,63 @@ def do_results(conn, date_str: str, states: list[str], circuit: str) -> None:
     print(f"  Stored {total} result rows (starting prices included).")
 
 
+def do_snapshot(conn, date_str: str) -> None:
+    """Record today's Indian forecast prices, and settle any SPs we now hold.
+
+    This is the data-collection half of the one question the archive cannot
+    currently answer -- see scripts/early_price.py and the odds_snapshots
+    comment in db/schema.py. Run it on a race day (indiarace only publishes
+    these on the day itself, not the night before), then again after the
+    racing so the settled SPs land alongside the early quotes.
+
+    Safe to run repeatedly: stages upsert, so a later run just refreshes.
+    """
+    from db.ingest import snapshot_odds, snapshot_settle_sp
+    from scrapers import indiarace as ir
+
+    venues = [r["venue"] for r in conn.execute(
+        "SELECT DISTINCT venue FROM races WHERE race_date=? AND circuit='India' ORDER BY venue",
+        (date_str,)).fetchall()]
+    if not venues:
+        print(f"No Indian meeting loaded for {date_str}. Load a card first "
+              f"(app sidebar, or scripts/backfill.py).")
+        return
+
+    total_stages = 0
+    for venue in venues:
+        races = conn.execute(
+            "SELECT id, race_number FROM races WHERE race_date=? AND venue=? ORDER BY race_number",
+            (date_str, venue)).fetchall()
+        field_by_race = {}
+        for r in races:
+            names = [row["name"] for row in conn.execute(
+                """SELECT h.name FROM runs r JOIN horses h ON h.id = r.horse_id
+                   WHERE r.race_id = ? AND r.scratched = 0""", (r["id"],))]
+            if names:
+                field_by_race[r["race_number"]] = names
+        try:
+            raw = ir.fetch_odds_html(venue, date_str, use_cache=False)
+            odds_map = ir.parse_odds(raw) if raw else {}
+        except Exception as exc:
+            print(f"  {venue}: odds fetch failed -- {exc}")
+            continue
+        if not odds_map:
+            print(f"  {venue}: no prices posted yet "
+                  f"(indiarace fills this on race-day morning)")
+            continue
+        res = snapshot_odds(conn, date_str, venue, odds_map, field_by_race)
+        total_stages += res["stages_written"]
+        print(f"  {venue}: {res['stages_written']} stage quotes across {res['races']} races "
+              f"({len(odds_map)} runners priced on the page)")
+
+    settled = snapshot_settle_sp(conn, date_str)
+    print(f"\nStored {total_stages} early-price quotes; {settled} settled SPs recorded.")
+    if settled == 0:
+        print("No SPs yet -- rerun this after the results are in "
+              "(`python -m scripts.daily --results <date>` first).")
+    print("Report: python scripts/early_price.py")
+
+
 def do_backfill(conn, days: int, states: list[str], circuit: str) -> None:
     """Archive recent results so the connections signal and the backtest have
     something to work with. The model's jockey/trainer/owner strike rates on
@@ -304,6 +361,9 @@ def main() -> None:
     ap.add_argument("--settle", metavar="DATE", help="Grade saved parlays for a date and exit")
     ap.add_argument("--results", metavar="DATE", help="Fetch results/SPs for a date and exit")
     ap.add_argument("--backfill", type=int, metavar="DAYS", help="Archive N days of past results and exit")
+    ap.add_argument("--snapshot", nargs="?", const="", metavar="DATE",
+                    help="Record Indian forecast prices (and settle SPs) for a date, then exit. "
+                         "Defaults to --date. Run on a race day; indiarace only posts these on the day.")
     ap.add_argument("--no-load", action="store_true", help="Use what's already in the DB")
     ap.add_argument("--no-odds", action="store_true",
                     help="Skip the NZ TAB odds fetch (Australia only)")
@@ -323,6 +383,11 @@ def main() -> None:
     if args.backfill:
         _h(f"BACKFILLING {args.backfill} DAYS ({args.circuit})")
         do_backfill(conn, args.backfill, args.states, args.circuit)
+        return
+    if args.snapshot is not None:
+        snap_date = args.snapshot or args.date
+        _h(f"ODDS SNAPSHOT {snap_date} (India)")
+        do_snapshot(conn, snap_date)
         return
 
     _h(f"{args.circuit.upper()} -- {args.date}")

@@ -133,6 +133,35 @@ CREATE TABLE IF NOT EXISTS market_odds (
     UNIQUE(race_id, horse_id, market, source)
 );
 
+-- Price history per runner, as opposed to market_odds which holds only the
+-- current best quote per source. This table exists to answer ONE question the
+-- archive currently cannot: does this model beat the price you could actually
+-- have taken?
+--
+-- Every accuracy measurement so far benchmarks the model against the FINAL
+-- starting price, which is the sharpest number in existence -- it contains all
+-- the late money. Losing to it (26.8% vs 48.5%) is expected of almost any
+-- model. The open question is whether the model beats the EARLY price, the one
+-- actually on offer when you would bet. Nobody archives Indian forecast prices,
+-- so that comparison has never been possible; from now on each race day's
+-- night/morning/opening quotes are kept here alongside the settled SP, and
+-- scripts/early_price.py reports the comparison once enough days accumulate.
+--
+-- stage is the source's own label ('night'/'morning'/'opening'), plus 'sp'
+-- for the settled starting price copied across after results land. One row
+-- per named stage per runner, upserted, since the labels are fixed rather
+-- than arbitrary capture times.
+CREATE TABLE IF NOT EXISTS odds_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    race_id INTEGER NOT NULL REFERENCES races(id),
+    horse_id INTEGER NOT NULL REFERENCES horses(id),
+    source TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    decimal_odds REAL NOT NULL,
+    captured_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(race_id, horse_id, source, stage)
+);
+
 -- A suggested (and possibly placed) multi/parlay. Stored whole so the daily
 -- followup can settle it leg by leg and the calibration view can compare the
 -- hit rate we predicted against the hit rate we got.
@@ -277,6 +306,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
 
     conn.execute("CREATE INDEX IF NOT EXISTS idx_races_date_circuit ON races(race_date, circuit)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_market_odds_race ON market_odds(race_id, market)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_odds_snapshots_race ON odds_snapshots(race_id, stage)")
 
 
 if __name__ == "__main__":

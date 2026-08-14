@@ -188,3 +188,66 @@ def result_banner(*, outcome: str, text: str) -> str:
     """outcome: 'won' | 'lost' | 'neutral'."""
     cls = {"won": "won", "lost": "lost"}.get(outcome, "")
     return f'<div class="rp-result {cls}">{text}</div>'
+
+
+# Measured on 503 archived India races with both model scores and settled
+# starting prices (scripts/backtest.py, leak-free). These are the single most
+# actionable numbers in the whole archive, which is why they are surfaced at
+# the point of decision rather than left in the Backtest tab: whether the model
+# and the market agree predicts the outcome far better than the model's own
+# confidence does.
+AGREE_WIN_RATE = 53          # model pick == market favourite
+DISAGREE_MODEL_RATE = 12     # model pick, when it differs from the favourite
+DISAGREE_FAV_RATE = 43       # the favourite, in those same races
+
+
+def market_agreement(entries: list[dict], odds_map: dict) -> dict | None:
+    """Does the model's top pick match the market's shortest price?
+
+    Returns None when there is no usable price -- the check is meaningless
+    without a market, and a fabricated 'agreement' would be worse than silence.
+    """
+    if not entries or not odds_map:
+        return None
+    priced = [(e, odds_map.get((e.get("horse_name") or "").upper())) for e in entries]
+    priced = [(e, i) for e, i in priced if i and i.get("odds_decimal") is not None]
+    if len(priced) < 2:
+        return None
+    top = entries[0]
+    favourite, fav_info = min(priced, key=lambda p: p[1]["odds_decimal"])
+    agrees = (favourite.get("horse_name") or "").upper() == (top.get("horse_name") or "").upper()
+    return {
+        "agrees": agrees,
+        "pick": top.get("horse_name"),
+        "favourite": favourite.get("horse_name"),
+        "favourite_odds": fav_info.get("odds_fraction") or f'{fav_info["odds_decimal"]:.2f}',
+    }
+
+
+def market_agreement_banner(agreement: dict | None) -> str:
+    """The agreement check rendered as a callout.
+
+    Deliberately blunt when the model disagrees with the market, because that
+    is the case where the archive says to stand down: the model's pick won 12%
+    of those races while the favourite won 43%. Presenting that as a neutral
+    'note' would be underselling a 31-point gap.
+    """
+    if not agreement:
+        return ""
+    if agreement["agrees"]:
+        return (
+            '<div class="rp-result won">'
+            f'<b>Market agrees.</b> {_esc(agreement["pick"])} is also the shortest price. '
+            f'On {AGREE_WIN_RATE}% of past races where the two agreed, this pick won.'
+            "</div>"
+        )
+    return (
+        '<div class="rp-result lost">'
+        f'<b>Market disagrees.</b> The board makes '
+        f'{_esc(agreement["favourite"])} favourite at {_esc(agreement["favourite_odds"])}, '
+        f'not {_esc(agreement["pick"])}.<br>'
+        f'Across ~500 archived races the model won only {DISAGREE_MODEL_RATE}% when it '
+        f'disagreed, while the favourite won {DISAGREE_FAV_RATE}%. '
+        f'Historically the board has been the one to trust here -- size down or skip.'
+        "</div>"
+    )

@@ -310,6 +310,31 @@ with st.sidebar:
             st.error(f"Refresh failed: {e}")
 
 
+def ui_odds_map(race_id: int, session_map: dict | None) -> dict:
+    """Odds for one race in the shape the Race Day components expect.
+
+    Two routes now supply Indian prices -- the Race Day fetch button (which
+    holds them in session state) and the Odds tab, which persists to
+    market_odds -- so this reads both, session state first because it is the
+    fresher of the two within a run.
+
+    UNIT NOTE: market_odds stores TRUE DECIMAL (4/1 -> 5.0) while these
+    components take ODDS-TO-ONE (4/1 -> 4.0), since ui.implied_probability
+    computes 1/(odds+1). Hence the -1.0 on the way out. Getting this backwards
+    would quietly overstate every runner's implied chance.
+    """
+    if session_map:
+        return session_map
+    out = {}
+    for name, v in load_market_odds(conn, race_id).items():
+        win = v.get("win")
+        if not win or win <= 1.0:
+            continue
+        to_one = win - 1.0
+        out[name] = {"odds_decimal": to_one, "odds_fraction": f"{to_one:.2f}/1"}
+    return out
+
+
 def get_race_plans(d: str, v: str) -> list[dict]:
     rows = conn.execute(
         "SELECT id, race_number, race_name, class_code, distance_m FROM races "
@@ -420,6 +445,16 @@ with tab_raceday:
                 unsafe_allow_html=True,
             )
 
+            # Whether the model and the market agree predicts the result far
+            # better than the model's own confidence does (53% vs 12%), so it
+            # sits directly under the pick rather than in the Backtest tab.
+            # Needs a price, so it appears once odds have been fetched/pasted.
+            _odds_now = ui_odds_map(rp["race_id"],
+                                    st.session_state.get(f"odds_{date_str}_{venue}"))
+            _agreement = ui.market_agreement(entries, _odds_now)
+            if _agreement:
+                st.markdown(ui.market_agreement_banner(_agreement), unsafe_allow_html=True)
+
             # The decision tool. Neither club publishes pre-race odds, so the
             # board price is the one input only the user can supply -- typing it
             # here closes the loop between model and counter.
@@ -456,12 +491,13 @@ with tab_raceday:
             # Value view. Ranking by win chance answers "which horse is best";
             # ranking by edge over the market answers "which horse is worth
             # backing" -- the question that actually decides profit.
-            odds_map = st.session_state.get(f"odds_{date_str}_{venue}")
+            odds_map = _odds_now or None
             st.markdown(ui.section_label("Best value in this race"), unsafe_allow_html=True)
             if odds_map is None:
                 st.caption(
                     "indiarace publishes forecast prices for Indian races. Pull them to see "
-                    "which runners are **underpriced** rather than just which are fastest."
+                    "which runners are **underpriced** rather than just which are fastest. "
+                    "Prices fetched or pasted in the **Odds** tab show up here too."
                 )
                 if st.button("Get odds from indiarace", use_container_width=True, key="get_odds"):
                     try:
