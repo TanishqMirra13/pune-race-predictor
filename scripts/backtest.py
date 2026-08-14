@@ -46,7 +46,7 @@ from models.rating_engine import apply_weights, compute_composite_scores
 def load_backtest_races(conn, venue: str | None = None) -> list[dict]:
     """Each item: {'race_id', 'venue', 'race_date', 'favourite', 'winner_horse_id',
     'winner_name', 'entries' (with features + current-weight probabilities)}."""
-    q = """SELECT ra.id, ra.venue, ra.race_date, ra.race_number, ra.tote_favourite
+    q = """SELECT ra.id, ra.venue, ra.race_date, ra.race_number, ra.race_name, ra.tote_favourite
            FROM races ra
            WHERE EXISTS (SELECT 1 FROM runs r JOIN results res ON res.run_id = r.id
                          WHERE r.race_id = ra.id AND res.finish_position = 1)"""
@@ -69,11 +69,40 @@ def load_backtest_races(conn, venue: str | None = None) -> list[dict]:
             continue  # walkovers/tiny fields aren't informative
         races.append({
             "race_id": row["id"], "venue": row["venue"], "race_date": row["race_date"],
-            "race_number": row["race_number"], "favourite": row["tote_favourite"],
+            "race_number": row["race_number"], "race_name": row["race_name"],
+            "favourite": row["tote_favourite"],
             "winner_horse_id": winner["horse_id"], "winner_name": winner["name"],
             "entries": entries,
         })
     return races
+
+
+def by_day_type(races: list[dict]) -> dict:
+    """Model and favourite hit rates split by race-day type.
+
+    Here so the "big-crowd days are less predictable" question stays
+    answerable as the archive grows. As of Aug 2026 it is answered NO on both
+    tests run (see models/raceday.py), but holiday races numbered only 7 --
+    far too few to be final, which is exactly why this breakdown exists rather
+    than a one-off script.
+    """
+    from models.raceday import classify
+
+    out = {}
+    for race in races:
+        kind = classify(race["race_date"], race.get("race_name"))["kind"]
+        b = out.setdefault(kind, {"n": 0, "model": 0, "favourite": 0, "fav_races": 0})
+        b["n"] += 1
+        b["model"] += race["entries"][0]["horse_id"] == race["winner_horse_id"]
+        fav = (race.get("favourite") or "").strip()
+        if fav:
+            b["fav_races"] += 1
+            b["favourite"] += fav.upper() == race["winner_name"].strip().upper()
+    for b in out.values():
+        b["model_win_rate"] = round(b["model"] / b["n"], 3) if b["n"] else None
+        b["favourite_win_rate"] = (round(b["favourite"] / b["fav_races"], 3)
+                                   if b["fav_races"] else None)
+    return out
 
 
 def benchmark(races: list[dict]) -> dict:

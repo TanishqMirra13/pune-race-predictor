@@ -20,6 +20,7 @@ from models.betslip import (
     DEFAULT_MIN_EDGE_AT_PLACEMENT, build_slip, validate_against_live,
 )
 from models.odds import margin_percent, overround
+from models import raceday
 from models.staking import (
     build_win_place_plan, harville_forecast_probabilities, jackpot_leg_plan, stop_rules,
     build_place_shortlist,
@@ -449,6 +450,15 @@ with tab_raceday:
             # better than the model's own confidence does (53% vs 12%), so it
             # sits directly under the pick rather than in the Backtest tab.
             # Needs a price, so it appears once odds have been fetched/pasted.
+            # Race-day context. Shown because the "big-crowd days are less
+            # predictable" belief is common and worth answering with the
+            # archive rather than leaving unaddressed -- but it changes no
+            # scoring, because the effect was measured and isn't there.
+            # See models/raceday.py.
+            _day_note = raceday.context_note(date_str, rp.get("race_name"))
+            if _day_note:
+                st.caption(f"📅 {_day_note}")
+
             _odds_now = ui_odds_map(rp["race_id"],
                                     st.session_state.get(f"odds_{date_str}_{venue}"))
             _agreement = ui.market_agreement(entries, _odds_now)
@@ -931,7 +941,7 @@ with tab_backtest:
     )
     if st.button("Run backtest"):
         from scripts.backtest import benchmark as bt_benchmark, calibration as bt_calibration, \
-            load_backtest_races, signal_patterns
+            load_backtest_races, signal_patterns, by_day_type as bt_by_day_type
         with st.spinner("Replaying archived races..."):
             bt_races = load_backtest_races(conn, None if bt_venue == "All venues" else bt_venue)
             st.session_state["bt"] = {
@@ -939,6 +949,7 @@ with tab_backtest:
                 "benchmark": bt_benchmark(bt_races),
                 "calibration": bt_calibration(bt_races),
                 "patterns": signal_patterns(bt_races),
+                "day_types": bt_by_day_type(bt_races),
             }
     bt = st.session_state.get("bt")
     if bt:
@@ -993,11 +1004,44 @@ with tab_backtest:
                 use_container_width=True, hide_index=True,
             )
         st.caption(
-            "These patterns are already folded into the model: weights were re-tuned on this archive "
-            "(rating 0.35→0.25, form 0.15→0.25, sharper probability spread), which lifted the "
-            "backtested top-pick hit rate from 38.7% to 40.1% on Pune. Rerun after each race weekend "
-            "as the archive grows."
+            "These patterns are already folded into the model: weights were re-tuned by grid search "
+            "on this archive. Note the headline numbers here are the honest, leak-free ones — an "
+            "earlier version of this tab reported ~40% because connection stats were computed from "
+            "the whole archive including the race being graded. Rerun after each race weekend."
         )
+
+        st.divider()
+        st.markdown("**Are big-crowd days less predictable?**")
+        # .get() rather than [] : a session that ran the backtest before this
+        # breakdown existed still holds a result dict without the key.
+        _day_types = bt.get("day_types") or {}
+        st.caption(
+            "A common belief is that holidays and feature days produce more upsets, or that such "
+            "races are more likely to be manipulated. Tested on this archive it does not hold: "
+            "favourites won 43% on special days vs 47% on ordinary ones (z=−0.63, not "
+            "significant), and favourites ran *unplaced* less often on special days, not more "
+            "(16.7% vs 20.5%, z=−0.78). Bolters were rarer too. Nothing in the scoring changes "
+            "for these days — there is no measured effect to encode, and fitting one to noise "
+            "would be worse than leaving it alone. This table is here so the question can be "
+            "re-answered as the archive grows."
+        )
+        st.dataframe(
+            [{"Day type": k,
+              "Races": v["n"],
+              "Model top pick": f"{v['model_win_rate']*100:.1f}%" if v["model_win_rate"] is not None else "n/a",
+              "Tote favourite": f"{v['favourite_win_rate']*100:.1f}%" if v["favourite_win_rate"] is not None else "n/a"}
+             for k, v in sorted(_day_types.items(), key=lambda kv: -kv[1]["n"])],
+            use_container_width=True, hide_index=True,
+        )
+        _hol = _day_types.get("holiday", {}).get("n", 0)
+        if _hol < 30:
+            st.caption(
+                f"⚠️ Only {_hol} holiday race(s) on record — far too few to conclude anything "
+                f"either way. Treat that row as a placeholder that fills up over time, not as "
+                f"evidence. Note also that results data can show *upsets*; it cannot show "
+                f"manipulation. And if a real effect ever emerges, the right response is a "
+                f"smaller stake, never a different horse."
+            )
 
 with tab_bankroll:
     st.subheader("Log a bet")
