@@ -461,9 +461,19 @@ with tab_raceday:
 
             _odds_now = ui_odds_map(rp["race_id"],
                                     st.session_state.get(f"odds_{date_str}_{venue}"))
-            _agreement = ui.market_agreement(entries, _odds_now)
-            if _agreement:
-                st.markdown(ui.market_agreement_banner(_agreement), unsafe_allow_html=True)
+            # Resolved via getattr rather than called directly. Streamlit Cloud
+            # kept an already-imported ui.components in memory across a
+            # redeploy, so app.py was the new version while the module was the
+            # old one -- and a missing attribute on an OPTIONAL badge took the
+            # whole app down with an AttributeError. A reboot clears the cache,
+            # but no display extra should ever be able to break the page, so
+            # this degrades to "no badge" instead.
+            _mk_agreement = getattr(ui, "market_agreement", None)
+            _mk_banner = getattr(ui, "market_agreement_banner", None)
+            if _mk_agreement and _mk_banner:
+                _agreement = _mk_agreement(entries, _odds_now)
+                if _agreement:
+                    st.markdown(_mk_banner(_agreement), unsafe_allow_html=True)
 
             # The decision tool. Neither club publishes pre-race odds, so the
             # board price is the one input only the user can supply -- typing it
