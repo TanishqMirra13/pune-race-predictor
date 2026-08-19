@@ -1,54 +1,185 @@
-# Race Predictor -- India / Australia / Hong Kong
+# Indian Race Predictor
 
-A local tool for entertainment analysis of horse racing across three circuits:
-India (Pune and Mumbai via RWITC, Bangalore via BTC, and Hyderabad/Mysore/
-Kolkata/Delhi via indiarace.com), Australia (Racing Australia), and Hong Kong
-(HKJC). Enter a day's budget and goal, get a ranked,
-reasoned shortlist per race and a staking plan that respects that budget.
-**Not a winner-picker** -- horse racing is genuinely unpredictable. See the
+A local tool for entertainment analysis of Indian horse racing. Enter a day's
+budget and goal, get a ranked, reasoned shortlist per race, a staking plan that
+respects that budget, and a jackpot ticket built to actually hit.
+**Not a winner-picker** — horse racing is genuinely unpredictable. See the
 Bankroll & Calibration tab for an honest, ongoing record of how the model's
 confidence has actually tracked outcomes.
 
-The three circuits are not equivalent, and the difference decides what the
-tool can honestly do on each:
+The Australian and Hong Kong circuits that used to sit alongside this have been
+removed. They were a distraction from the only circuit whose data this project
+can actually get at reliably, and covering three jurisdictions badly is worse
+than covering one properly.
 
-| | Fields & form | Official rating | Automatic price feed | Pre-race odds | EV & parlays |
-|---|---|---|---|---|---|
-| **India** | yes | yes | **no** | manual paste | yes, once pasted |
-| **Australia** | yes | yes | yes (NZ TAB) | auto + paste | yes |
-| **Hong Kong** | in season | yes | yes (HKJC) | auto + paste | yes |
+## Indian racing is not one circuit
 
-**No Indian source publishes a machine-readable pre-race price.** The clubs
-print prices only after the race, on the results page; indiarace has an odds
-page but it currently serves empty tables (verified Aug 2026 across Kolkata,
-Pune and Hyderabad meetings). So there is no automatic Indian feed, and there
-may never be one.
+It is six active clubs under four regional turf authorities, and the grouping is
+not cosmetic. It decides when a venue races, which source answers for it, which
+fields come back populated, and how predictable the place is. The app calls
+these **verticals**, groups every venue picker by them, and gives them their own
+tab. `models/verticals.py` is the single place that knows the structure.
 
-A price still *exists*, though -- on the tote board at the track, and on
-whatever exchange or book you hold an account with. Since Aug 2026 the India
-circuit is no longer locked out of the Odds tab: paste that price in and
-everything downstream (value ranking, expected value, the parlay engine)
-works exactly as it does for Australia. The limitation is the *feed*, not the
-maths.
+| Vertical | Authority | Venues | Source | Archived | Favourite wins |
+|---|---|---|---|---:|---:|
+| **Western** | RWITC | Mumbai (Mahalaxmi), Pune | rwitc.com | 371 races | 46.7% |
+| **Southern** | BTC / Mysore RC / Hyderabad RC | Bangalore, Mysore, Hyderabad (Malakpet) | bangaloreraces.com, indiarace.com | 135 races | 54.3% |
+| **Eastern** | RCTC | Kolkata | indiarace.com | 14 races | 28.6% |
+| **Northern** | DRC | Delhi | indiarace.com | 0 races | — |
 
-Exchange back-prices are the best thing to paste -- much thinner margin than
-a bookmaker or a tote, so they are a sharper estimate of true probability.
-Paste them as close to the off as you can; the app flags a price older than
-90 minutes as stale, because an edge measured against a stale price is
-fiction.
+**Favourite wins** is the number that matters most per vertical, because it is
+the benchmark this model has to beat there. It is measured from the archive at
+runtime rather than quoted from anywhere, and it moves the practical advice: in
+the Southern vertical the favourite wins more than half the time and the market
+is very hard to argue with; in the Eastern one there are fourteen races on
+record, which is a story, not a statistic.
+
+Three structural facts that fall out of the grouping and are easy to mistake
+for bugs:
+
+- **Mumbai and Pune are the same club.** RWITC runs Mumbai over the cool months
+  and Pune through the monsoon, so "no Mumbai card in August" is the calendar
+  working, not the scraper failing.
+- **Venues are not equally well described.** RWITC publishes breeder, stud,
+  foaled date and a full per-run history. BTC publishes recent form as letter
+  codes rather than numeric placings, so the form signal is left blank rather
+  than guessed. The four indiarace-sourced clubs give neither breeder nor
+  foaled date. Every gap is listed per venue in the Verticals tab.
+- **Chennai and Ooty are deliberately not wired up.** indiarace's own fixture
+  feed stops in Oct 2025 and Jun 2024 for those two, so a venue entry would
+  promise data that is not there.
+
+## The jackpot planner
+
+A jackpot pays only if you hold the winner of every leg, so the question is not
+which horse to back but where to spend the combinations you can afford. The
+first version of this planner ranked legs by the model's own probability, took
+the top pick alone if it cleared 35% and otherwise spread the top three evenly.
+Replayed over the archive, both of those choices were close to the worst
+available. Two measured findings drove the rebuild — see `models/jackpot.py`
+for the full working.
+
+### 1. The market picks legs far better than the model
+
+Share of races whose winner came from the top N of each ranking, over 431
+fully-priced Indian races:
+
+| | top 1 | top 2 | top 3 | top 4 |
+|---|---:|---:|---:|---:|
+| Starting-price market | 47% | 67% | 79% | 88% |
+| This model | 27% | 44% | 58% | 71% |
+
+Compounded across legs, that gap is enormous. Whole tickets, replayed over every
+complete archived race day, covering the top three of each ranking in every leg:
+
+| Legs | Combinations | Market-ranked | Model-ranked |
+|---:|---:|---:|---:|
+| 3 | 27 | 40.3% | 19.4% |
+| 4 | 81 | 32.3% | 13.8% |
+| 5 | 243 | 25.4% | 7.9% |
+
+Same money, three times the hit rate. This is the same conclusion the win-bet
+backtest reached — where model and market disagree, the market is right —
+applied where it compounds hardest. So the planner is market-led by default.
+The model weight slider starts at zero, and says why.
+
+### 2. Spreading evenly wastes combinations
+
+Legs are not equally hard. One race has a standout; the next has five runners
+the market cannot separate. An even spread buys coverage where it was already
+cheap and refuses it where it is needed. The planner allocates by marginal value
+instead — each extra runner goes wherever it buys the most extra chance per
+rupee — then rebalances, because pure marginal efficiency has a standing bias
+toward the leg it has already spent on and leaves tickets lopsided.
+
+| Legs | Combinations | Even spread | This planner |
+|---:|---:|---:|---:|
+| 3 | 27 | 40.6% | 50.7% |
+| 4 | 16 | 8.7% | 20.3% |
+| 4 | 81 | 31.9% | 46.4% |
+| 5 | 32 | 5.8% | 11.6% |
+| 5 | 243 | 24.6% | 36.2% |
+| 6 | 729 | 22.6% | 32.3% |
+
+The advantage narrows to nothing once the budget covers four runners in every
+leg, which is where the shape of a race stops mattering because you have bought
+most of it. Below that — every realistic budget — it is worth 6 to 15 points.
+
+Together the two changes take a five-leg jackpot at 243 combinations from
+**7.9% to 36.2%**: a bet that lands about one race day in three instead of one
+in thirteen. On 69 race days the 95% confidence interval is about ±12 points, so
+read the direction rather than the decimals.
+
+### Three things the planner tells you that a hit rate does not
+
+- **A jackpot is pari-mutuel.** The dividend is the pool split among everyone
+  holding the same line, and covering the market's favourites is exactly the
+  line most other tickets hold — so the combinations that hit most often pay
+  least when they do. Hyderabad, 10 Aug 2026: the front of the market won all
+  five legs, 1,468 tickets shared the pool, it paid Rs317. The day before, the
+  same bet paid Rs32,647 to sixteen tickets. **Hitting it and making money are
+  different questions**, and the planner prints the break-even dividend next to
+  the hit probability so they can be asked separately.
+- **The club chooses the legs, and it varies.** Hyderabad ran its jackpot over
+  races 4-8 on 27 Jul 2026 and races 3-7 on 9 Aug. Every result page loaded now
+  records which races made up each pool, so the planner offers the club's real
+  legs rather than assuming the last five. Where nothing is archived it says it
+  is guessing.
+- **What the next rupee buys.** The planner names the runner it would add next,
+  what that costs, and the dividend that would have to clear for it to be worth
+  adding.
+
+### The honest limit
+
+A jackpot ticket must be submitted before the first leg runs, and a starting
+price is only known after its own race. The replay above ranks legs on starting
+prices, so it measures how good the method is when its input is good and is an
+**upper bound** on what the same method does off race-morning forecast prices.
+Closing that gap is what the odds-snapshot archive is for. On the one Kolkata
+card where both exist the forecast agreed with the starting price on the
+favourite in 6 races of 7 — encouraging, and nowhere near enough to conclude
+anything. `scripts/early_price.py` still refuses a verdict under 30 races.
+
+## Getting a price in
+
+No Indian club publishes a live, machine-readable board. What exists:
+
+| Source | Status |
+|---|---|
+| **indiarace forecast prices** | works — but **indicative**, race-day only, and covering just the front 4-5 runners (42-62% of a field) |
+| **Club result pages (starting prices)** | exact, and only available *after* the race |
+| A live tote board | exists at the track and on screens; nothing serves it machine-readably |
+
+The partial coverage matters differently for different bets, and this is the
+one place the app deliberately holds two standards:
+
+- **The parlay engine refuses a race priced below 80% of its field**, and it is
+  right to. De-vigging a subset invents an edge instead of removing a margin —
+  a live run with 3 of 14 runners priced reported a *220% edge* before this
+  guard existed.
+- **The jackpot planner uses a partial book anyway.** A jackpot leg needs the
+  market's running order at the front of the book, not a de-vigged book, and
+  the front is exactly what indiarace prices. The planner scales a partial book
+  by the measured full-book overround rather than normalising it to sum to 1
+  (which is the step that would inflate it) and shares the remainder among the
+  unpriced runners by model score.
+
+Paste a board or exchange price in the Odds tab and it overrides the forecast
+for that runner — exchange back-prices are the best thing to paste, since a much
+thinner margin makes them a sharper estimate of true chance. Paste as close to
+the off as you can; the app flags a price older than 90 minutes as stale,
+because an edge measured against a stale price is fiction.
 
 ## Read this before betting a parlay
 
-A multi is the worst-priced product on any board, and the reason is
-arithmetic, not opinion. Every leg is priced with the bookmaker's margin
-already inside it, and combining legs multiplies those margins:
+A multi is the worst-priced product on any board, and the reason is arithmetic,
+not opinion. Every leg carries the tote's takeout, and combining legs multiplies
+those margins. The median complete Indian starting-price book in this archive
+comes to an overround of **1.203** — about 17% — measured over 396 races, so
+three legs means betting into roughly a **43%** margin before anyone has an
+opinion about a horse.
 
-- Three legs into a typical 16% Australian book = betting into a **36%**
-  margin.
-- A three-leg Hong Kong all-up gives up about **44%** to tote takeout before
-  anyone has an opinion about a horse.
-
-No staking plan, bankroll rule or selection method overcomes a 36% head start.
+No staking plan, bankroll rule or selection method overcomes a 43% head start.
 There is exactly one condition under which a multi is worth placing, and
 `models/parlay.py` enforces it: **every single leg must be independently +EV**,
 meaning the price on offer is longer than our best estimate of that runner's
@@ -57,31 +188,28 @@ true chance. Then multiplying the legs multiplies an edge instead of a deficit.
 Consequences that are features, not bugs:
 
 - **Most days produce no qualifying multi.** An empty result means the market
-  was efficient, which is a market's normal state. The tool says so rather
-  than manufacturing a tip.
+  was efficient, which is a market's normal state. The tool says so rather than
+  manufacturing a tip.
 - **Singles are listed above multis.** A single on a value selection has the
-  same edge as that leg inside a multi with a fraction of the variance. If the
-  goal is a small regular return, the singles table is the honest answer.
-- **Two runners from the same race are never combined.** They are not
-  independent -- they cannot both win -- so multiplying their probabilities
-  overstates the multi's real chance. Same-race combinations belong in the
-  Forecast/Quinella planner, which prices them properly.
+  same edge as that leg inside a multi with a fraction of the variance.
+- **Two runners from the same race are never combined.** They cannot both win,
+  so multiplying their probabilities overstates the multi's real chance.
+  Same-race combinations belong in the Forecast/Quinella planner.
 
 ### On daily profit targets
 
 Wanting a fixed return per day is the most common way a betting plan fails,
 because the target is fixed and the results are not. The Daily Parlays tab
-answers the question directly for whatever target you enter: the stake it
-would take, the probability it lands, and the expected P&L at that stake. When
-the required stake exceeds the Kelly stake it says so, because past that point
-you are growing risk faster than return.
+answers the question directly for whatever target you enter: the stake it would
+take, the probability it lands, and the expected P&L at that stake. When the
+required stake exceeds the Kelly stake it says so, because past that point you
+are growing risk faster than return.
 
-A worked example the tool will print for you: a multi paying 6.13 that lands
-19% of the time needs a Rs146 stake to clear Rs750 -- and loses that stake on
-81% of days. Even with a genuine +5% edge, the honest expectation is a few
-hundred rupees a month with a losing run of a fortnight inside it, not
-Rs500-1000 banked daily. The edge is real or it isn't; the *schedule* is
-never under your control.
+A worked example the tool will print for you: a multi paying 6.13 that lands 19%
+of the time needs a Rs146 stake to clear Rs750 — and loses that stake on 81% of
+days. Even with a genuine +5% edge, the honest expectation is a few hundred
+rupees a month with a losing run of a fortnight inside it, not Rs500-1000 banked
+daily. The edge is real or it isn't; the *schedule* is never under your control.
 
 ## Run it
 
@@ -90,16 +218,15 @@ venv\Scripts\activate
 streamlit run app.py
 ```
 
-Opens at http://localhost:8501. Pick a **circuit** in the sidebar first, then a
-date:
+Opens at http://localhost:8501. Pick a venue in the sidebar — the picker is
+grouped by vertical and marks the meetings already loaded for that date — then
+**Fetch live**. Off-season or if the site is unreachable, use **Manual paste
+fallback** with the saved HTML source.
 
-- **India** -- pick a venue and click **Fetch live**. Off-season or if the site
-  is unreachable, use **Manual paste fallback** with the saved HTML source.
-- **Australia** -- pick states, click **Find meetings**, tick the ones you want
-  and **Load fields**. Racing happens somewhere every day of the year, usually
-  at 5-10 tracks at once, so load only what you'll actually look at.
-- **Hong Kong** -- pick the racecourse and click **Load card**. In season
-  (September to mid-July) this also pulls live win odds automatically.
+**Fetch results** does more than settle the day: it also records the jackpot,
+mini-jackpot and treble settlements from the foot of the same page, which is the
+only published record of which races made up each pool and how many tickets
+shared each dividend.
 
 ## The daily routine
 
@@ -107,16 +234,25 @@ Everything the app does is also available as one command, which is the way to
 run it day to day:
 
 ```
-python -m scripts.daily                             # today's Australian slate
-python -m scripts.daily --date 2026-08-01 --states NSW VIC
-python -m scripts.daily --circuit "Hong Kong"
-python -m scripts.daily --settle 2026-07-30         # grade yesterday's slips
-python -m scripts.daily --results 2026-07-30        # pull results + starting prices
-python -m scripts.daily --backfill 21               # archive 3 weeks of results
-python -m scripts.daily --snapshot                  # record today's Indian prices
+python -m scripts.daily                          # every venue, today
+python -m scripts.daily --vertical Western       # just RWITC (Mumbai/Pune)
+python -m scripts.daily --venues Hyderabad Mysore
+python -m scripts.daily --settle 2026-08-13      # grade yesterday's slips
+python -m scripts.daily --results 2026-08-13     # results, SPs and pool dividends
+python -m scripts.daily --backfill 21            # archive 3 weeks of results
+python -m scripts.daily --snapshot               # record today's forecast prices
 ```
 
-### The India race-day habit (two commands, ~10 seconds)
+Morning: it settles yesterday, loads today's fields across the venues you asked
+for, pulls the forecast prices, ranks the strongest model opinions so you know
+which races are worth pricing up, prints any multi that survives the EV test,
+and prints a jackpot plan per meeting. Evening: `--settle` tells you whether the
+day made money.
+
+It will not place a bet — nothing in this project talks to a bookmaker — and it
+will not invent a suggestion to fill the page.
+
+### The race-day habit (two commands, ~10 seconds)
 
 This is the one routine worth adding, because it collects data that does not
 otherwise exist anywhere:
@@ -130,102 +266,31 @@ python scripts/early_price.py                       # the report, once data accr
 
 **Why it matters.** Every accuracy figure in this project benchmarks the model
 against the *final* starting price — the sharpest number in racing, containing
-all the late money. The model loses to it badly, but so does almost every
-model, and that is not the question that decides whether betting it makes
-money. The question that decides that is whether the model beats the price
-that was **on offer when you would actually have bet**. Nobody archives Indian
-forecast prices, so that has never been answerable. `--snapshot` starts
-building the record; `scripts/early_price.py` reports it and deliberately
-**refuses to give a verdict under 30 races**, because a noisy number that
-looks like an edge is worse than no number.
-
-Morning: it settles yesterday, loads today's fields, ranks the strongest model
-opinions so you know which races are worth pricing up, and prints any multi
-that survives the EV test. Evening: `--settle` tells you whether the day made
-money.
-
-It will not place a bet -- nothing in this project talks to a bookmaker -- and
-it will not invent a suggestion to fill the page.
-
-## Getting odds in
-
-Every Australian source is walled off from an Indian IP -- except one. Tested
-from this machine, July 2026:
-
-| Source | Status |
-|---|---|
-| **NZ TAB affiliate API** | **works -- live fixed win/place odds, whole field** |
-| HKJC win odds and dividends | works, in season |
-| Racing Australia results (starting prices) | works, but only *after* the race |
-| TAB.com.au public API | geo-blocked -- region-unavailable page |
-| punters.com.au, racenet.com.au | 403 -- CloudFront |
-| Sportsbet | 403 -- Akamai "Access Denied" |
-| PointsBet | Cloudflare challenge |
-| Betfair (api, identity, AU site) | 403 at the edge |
-| Neds / Ladbrokes (Entain) | 500 from their gateway |
-
-**NZ TAB is the answer for Australian odds.** It books all the major
-Australian meetings and isn't geo-fenced the way tab.com.au is:
-
-```
-https://api.tab.co.nz/affiliates/v1/racing/meetings?date_from=&date_to=
-https://api.tab.co.nz/affiliates/v1/racing/events/{race_id}
-```
-
-Every runner carries `fixed_win`, `fixed_place`, `pool_win`, `pool_place`,
-plus barrier, jockey, trainer, weight, form and price fluctuations. In a real
-run it priced **189 runners across 16 live races in two meetings**, taking
-price coverage from 0% to 100% and getting every race past the coverage guard.
-No key, no account, no registration.
-
-`scrapers/tabnz.py` implements it. Two traps it handles, both found the hard
-way:
-
-- **The parameter is `date_from`/`date_to`, not `date`.** A `date` parameter is
-  accepted, silently ignored, and you get a valid 200 full of real odds *for
-  the wrong day*. The endpoint echoes its parsed parameters back, so the
-  scraper asserts they match what was asked for and raises if not.
-- **Settled races keep stale, pre-scratching fixed odds.** A real Eagle Farm
-  race showed a normal 1.203 book across all ten runners but 0.906 across the
-  seven that started, because three were scratched and the price was never
-  revised. A sub-1.0 book is meaningless to de-vig, so only live races are
-  fetched.
-
-**Whose price is it, though.** These are NZ TAB's prices. If you place bets
-somewhere else, the edge that matters is measured against *that* book's price.
-Use this feed to find races worth a look and as a fair-price benchmark, then
-confirm the number where you actually bet. Prices from here are stored under
-the source `tabnz`, which deliberately ranks *below* anything you enter
-yourself, so a pasted price always wins.
-
-The other paths still exist:
-
-1. **Paste them** (Odds tab) -- overrides the automatic feed. Recognised
-   shapes: `MAGIC MOMENT 3.40`, `7. Magic Moment $3.40 $1.55`, `Magic Moment
-   5/2`. Header and junk lines are ignored.
-2. **HKJC** -- scraped automatically in season.
-3. **Racing Australia SPs** -- automatic but post-race. Useless for betting,
-   essential for checking whether the model is any good.
-4. **An API you already have access to** -- a generic adapter configured
-   entirely by environment variables.
+all the late money. The model loses to it badly, but so does almost every model,
+and that is not the question that decides whether betting it makes money. The
+question that decides that is whether the model beats the price that was **on
+offer when you would actually have bet**. Nobody archives Indian forecast
+prices, so that has never been answerable. `--snapshot` starts building the
+record; `scripts/early_price.py` reports it and deliberately **refuses to give a
+verdict under 30 races**, because a noisy number that looks like an edge is
+worse than no number.
 
 ## Placing the bets
 
 The gap between "this is value" and "bet placed" is where automated betting
-usually loses money: the edge is measured at one book's price and the bet goes
-on at another book's price. If the second is shorter, the edge is gone — and an
-automated system keeps placing anyway, every day.
+usually loses money: the edge is measured at one price and the bet goes on at
+another. If the second is shorter, the edge is gone — and an automated system
+keeps placing anyway, every day.
 
 So every bet on the slip carries a **minimum acceptable price**, and nothing is
 placed below it. A selection we make a 20% chance is worth 5.50 and not worth
-4.60; the floor is 5.15 (a 3% edge), and at 4.60 the bet simply does not
-happen. A skipped bet costs nothing. A bet at the wrong price costs money every
-time.
+4.60; the floor is 5.15 (a 3% edge), and at 4.60 the bet simply does not happen.
+A skipped bet costs nothing. A bet at the wrong price costs money every time.
 
 The Daily Parlays tab prints the slip: selection, stake, the price the edge was
-found at, and the floor. Take it to your bookmaker, check the price, bet only
-the rows that still qualify. There's a price-checker in the same tab that gives
-a go/no-go on whatever number you're being shown.
+found at, and the floor. Take it to your bookmaker, check the price, bet only the
+rows that still qualify. There's a price-checker in the same tab that gives a
+go/no-go on whatever number you're being shown.
 
 Demonstrated with a book pricing 15% shorter across the board than where the
 edges were found:
@@ -245,8 +310,8 @@ those prices.
 `scrapers/bookmaker.py` has a provider-neutral adapter. `DryRunAdapter` is the
 default: it runs the full flow, validates every bet, places nothing. Real
 placement needs **four** switches — `allow_real_bets=True` in code, plus
-`BET_API_ENABLED=true`, `BET_API_URL` and `BET_API_TOKEN` in `.env` — so
-neither a stray default nor a copied `.env` can start moving money.
+`BET_API_ENABLED=true`, `BET_API_URL` and `BET_API_TOKEN` in `.env` — so neither
+a stray default nor a copied `.env` can start moving money.
 
 **Stake will not work for this.** Both `stake.com` and the `stake1021.com`
 mirror return Cloudflare's bot challenge (`cf-mitigated: challenge`) to every
@@ -256,17 +321,11 @@ fingerprint Cloudflare actively works to detect; this project does not do that.
 The adapter recognises a Cloudflare block and says so rather than retrying.
 Place manually from the bet slip instead.
 
-If you want genuinely automated placement, you need a bookmaker that *sanctions*
-it. Betfair's exchange API is the standard choice — it's documented, permitted,
-and the exchange has near-zero overround versus a bookmaker's 16%, so it's the
-better price as well as the automatable one. It also 403s from an Indian IP, and
-Betfair AU may not accept Indian residents, so check before building on it.
-
 ### If you have a bookmaker API key
 
 **Do not paste an API key into a chat window, a source file, or anything that
-gets committed.** Put it in a `.env` file in the project root -- `.gitignore`
-already covers it -- and the app reads it from there:
+gets committed.** Put it in a `.env` file in the project root — `.gitignore`
+already covers it — and the app reads it from there:
 
 ```
 ODDS_API_URL=https://.../races/{race}/odds
@@ -279,20 +338,13 @@ ODDS_API_PLACE_FIELD=placeOdds
 ```
 
 The adapter is deliberately book-agnostic rather than hard-coded to one
-provider's schema, since those change without notice. The Odds tab shows
-whether it's configured without ever displaying the key.
-
-**Prices for a race must cover at least 80% of the field** (90% for place
-bets), or the engine refuses the race. This is not fussiness. De-vigging works
-by scaling implied probabilities to sum to 1; do that to a subset and you
-don't remove a margin, you invent one, and every priced runner looks like
-enormous value. A live run with 3 of 14 runners priced reported a *220% edge*
-before this guard existed.
+provider's schema, since those change without notice. The Odds tab shows whether
+it's configured without ever displaying the key.
 
 ## Bulk historical backfill
 
-Rather than fetching one day at a time through the UI, pull a whole date
-range in one go:
+Rather than fetching one day at a time through the UI, pull a whole date range
+in one go:
 
 ```
 python scripts/backfill.py --venue Bangalore --start 2026-06-13 --end 2026-07-12
@@ -301,313 +353,228 @@ python scripts/backfill.py --venue Pune --start 2025-07-18 --end 2025-10-20
 python scripts/backfill.py --venue Hyderabad --start 2026-07-01 --end 2026-08-10
 ```
 
-Works the same way for Hyderabad, Mysore, Kolkata and Delhi (via
-`scrapers/indiarace_cards.py`) as it does for the RWITC/BTC venues -- same
-`--venue` flag, same date-range behavior. It fetches both the race card and
-results for every date in range, skips non-race days silently (that's normal
--- every Indian venue only races a few days a week, and several of these run
-seasonally rather than year-round), and caches each page under `data/cache/`
-so re-runs don't re-hit the server. Already run once for Bangalore's current
-season-to-date (10 real race days as of 2026-07-12) and Mumbai's
-just-completed 2025/26 season (Nov 2025 -- Apr 2026) as a starting dataset to
-test against -- Mumbai racing itself doesn't resume live until November 2026.
+Works the same way for every venue in every vertical — same `--venue` flag, same
+date-range behaviour. It fetches both the race card and results for every date
+in range, skips non-race days silently (that's normal — every Indian venue only
+races a few days a week, and several run seasonally), and caches each page under
+`data/cache/` so re-runs don't re-hit the server.
 
 ## Data sources
 
 - **Pune & Mumbai (RWITC, same site, auto-detects venue by date):**
-  `https://rwitc.com/new/erp_racecard.php?date=YYYY-MM-DD` for per-horse
-  entries (rating, weight, jockey, trainer, last-5-runs form), and
-  `https://rwitc.com/erp_raceresult.php?date=YYYY-MM-DD` for finishing
-  order, times, and tote dividends (WIN/PLACE/SHP/FOR/QNL/TNL).
+  `https://rwitc.com/new/erp_racecard.php?date=YYYY-MM-DD` for per-horse entries
+  (rating, weight, jockey, trainer, last-5-runs form), and
+  `https://rwitc.com/erp_raceresult.php?date=YYYY-MM-DD` for finishing order,
+  times, tote dividends (WIN/PLACE/SHP/FOR/QNL/TNL) and the multi-leg pool
+  settlements (Super Jackpot, Jackpot with its 70%/30% tiers, and the trebles).
+  Note RWITC numbers races cumulatively across a season, so an eight-race Pune
+  card can be races 26-33 — the pool tables give their legs as positions in the
+  day's card, and `models/jackpot.py` translates by position for that reason.
 - **Bangalore (BTC):** `https://bangaloreraces.com/racing/racecard?d=YYYY-MM-DD`
-  and `https://bangaloreraces.com/racing/results?d=YYYY-MM-DD`. Modern
-  semantic HTML (vs. RWITC's legacy nested tables), parsed in
-  `scrapers/btc.py`. Two known gaps vs. RWITC: BTC's racecard shows recent
-  form as letter codes rather than numeric placings (left blank rather than
-  guessed), and its results table doesn't list a per-runner trainer (only
-  the race winner's).
-- **Hyderabad, Mysore, Kolkata & Delhi (indiarace.com, `scrapers/indiarace_cards.py`):**
-  these four clubs don't have a scrapable racecard of their own -- Hyderabad
-  Race Club's site has no plain HTML racecard route, Mysore Race Club's
-  `/Racecard` and `/Results` routes 404 without params only its own JS
-  supplies, Royal Calcutta Turf Club gates racing data behind a separate
-  login (rctclive.in), and Delhi Race Club publishes entries/results as PDFs
-  only. indiarace.com -- already used for trackwork and pre-race odds --
-  turns out to carry a full racecard/result page for every club at
-  `Home/racingCenterEvent?venueId={id}&event_date=YYYY-MM-DD&race_type=RACECARD|RESULT`,
-  so these four venues go through that instead. Two gaps vs. RWITC/BTC:
-  breeder/stud/foaled date aren't broken out (only age/colour/sex as one
-  string), and "Last 5 runs" order is assumed newest-first (matching
-  RWITC/BTC and the model's recency weighting) rather than independently
-  verified the way the Racing Australia reversal below was.
-- `standard_timings.pdf` (`data/standard_timings.pdf`, RWITC only so far)
-  -- par times by class and distance, for Phase 2 speed figures. Currently a
-  2011-dated file (the most recent RWITC has published at a stable URL);
-  treat as a rough reference until replaced by empirically-derived pars from
-  our own results archive.
-- **Australia (Racing Australia)** -- `scrapers/racingaustralia.py`.
-  `/FreeFields/Calendar.aspx?State=NSW` for the fixture list,
-  `/FreeFields/Form.aspx?Key=2026Aug01,NSW,Rosehill Gardens` for fields plus
-  full per-horse form, `/FreeFields/Results.aspx?Key=...` for the finishing
-  order and every runner's decimal starting price. Chosen over the tipping and
-  odds sites because it's the national industry body (nothing sits between it
-  and the stewards), it's free, and it's the only one that answers from India.
-  It gives us three things the Indian clubs never did: an official handicap
-  rating for nearly every runner, a 10-run form string, and a real market
-  price.
-
-  One gotcha, verified rather than assumed: **Racing Australia's "Last 10"
-  reads oldest-first**, left to right -- the opposite of RWITC. Confirmed by
-  matching HELLOVA NATURE's `90x0321121` against its dated run list, where the
-  trailing `21121` lines up with its Apr-Jul placings 2,1,1,2,1. The rating
-  engine weights the *first* entry heaviest, so the parser reverses the string
-  on the way in. Getting this backwards would have silently inverted the form
-  signal on every Australian runner.
-- **Hong Kong (HKJC)** -- `scrapers/hkjc.py`.
-  `/racing/information/English/Racing/LocalResults.aspx?RaceDate=YYYY/MM/DD&Racecourse=HV&RaceNo=N`
-  for results and `RaceCard.aspx` for the card. The best-documented racing
-  jurisdiction anywhere for this purpose: a closed pool of about 1,200 rated
-  horses, two courses, and the club publishes finishing times, sectional
-  running positions, every runner's win odds and the full dividend table for
-  every pool.
-
-  Two structural facts the code depends on: **dividends are quoted per HK$10
-  stake**, not per HK$1 (a WIN dividend of 111.00 is a decimal price of 11.1),
-  handled in one place by `dividend_to_decimal()`; and **the season runs
-  September to mid-July**, so between mid-July and September there is no
-  Hong Kong racing at all -- not a reduced card, none. `season_status()` exists
-  so the app can tell "no card published" apart from "the scraper broke".
-
-  The results parser is verified against real meetings. The **race-card parser
-  is provisional**: HKJC withdraws a card once its meeting has run, and the
-  season was already over when it was written, so it matches the club's
-  published layout but has not been run against a live card. It fails soft
-  (returns nothing rather than raising). Verify it on the first meeting of the
-  new season before trusting a number that comes out of it.
+  and `.../results?d=YYYY-MM-DD`. Modern semantic HTML (vs. RWITC's legacy
+  nested tables), parsed in `scrapers/btc.py`. Two known gaps: recent form comes
+  as letter codes rather than numeric placings (left blank rather than guessed),
+  and the results table doesn't list a per-runner trainer.
+- **Hyderabad, Mysore, Kolkata & Delhi (indiarace.com,
+  `scrapers/indiarace_cards.py`):** these four clubs have no scrapable racecard
+  of their own — Hyderabad's site has no plain HTML racecard route, Mysore's
+  `/Racecard` and `/Results` 404 without params only its own JS supplies, RCTC
+  gates racing data behind a separate login (rctclive.in), and Delhi publishes
+  entries and results as PDFs only. indiarace carries a full racecard/result
+  page for every club at
+  `Home/racingCenterEvent?venueId={id}&event_date=YYYY-MM-DD&race_type=RACECARD|RESULT`.
+  Two gaps vs. RWITC/BTC: breeder/stud/foaled date aren't broken out, and
+  "Last 5 runs" order is assumed newest-first rather than independently
+  verified.
+- **Pool dividends.** Both sources carry a jackpot/treble settlement table at the
+  foot of a result page, and nothing else in the pipeline records what is in it:
+  which races made up each pool, and how many tickets shared each dividend.
+  indiarace publishes its two-tier jackpot unlabelled ("9390 & 91296 (TKTS 25 &
+  06)"); multiplying each dividend by its ticket count showed a 30.0/70.0 split
+  of one pool on all five two-tier jackpots in the cache, which is how the tiers
+  were identified — RWITC labels its equivalents explicitly and corroborates it.
+- `standard_timings.pdf` (`data/standard_timings.pdf`, RWITC only) — par times by
+  class and distance, for Phase 2 speed figures. Currently a 2011-dated file;
+  treat as a rough reference until replaced by pars derived from our own archive.
 
 ## Odds maths (`models/odds.py`)
 
-Three ideas everything on the AU/HK circuits rests on:
-
 1. **A book doesn't sum to 100%.** It sums to more, and the excess is the
-   margin. Measured on real data: an Australian country SP book came to 1.210
-   (a 17.4% bite), and a Happy Valley win pool to 1.221 -- against HKJC's
-   *published* 17.5% takeout, which is a useful independent check that both the
-   parser and the maths are right.
+   margin. Measured over 396 complete Indian starting-price books, the median is
+   **1.203**.
 2. **Stripping the margin proportionally is wrong.** Racing markets show a
    persistent favourite-longshot bias: longshots are systematically overbet.
    Proportional de-vigging assumes the margin is spread evenly and so flatters
-   longshots -- exactly where a naive model wants to bet. The **power method**
+   longshots — exactly where a naive model wants to bet. The **power method**
    (solve for *k* such that the implied probabilities raised to *k* sum to 1)
-   shrinks long prices more than short ones. On that real Australian race it
-   moved the favourite 38.4% -> 41.8% and the 71.00 outsider 1.2% -> 0.8%.
-3. **The market is a strong opponent.** This project's own backtest found that
+   shrinks long prices more than short ones.
+3. **The power method still under-corrects on an Indian tote.** Summing the top
+   three de-vigged probabilities gives 72% where the winner actually came from
+   that top three 80% of the time — a persistent gap, not noise. Raising the
+   de-vigged probabilities to the power **1.25** and renormalising closes it
+   across every N, and holds on both halves of the archive by date and at all
+   three well-sampled venues. `models/jackpot.py` applies it. It changes no
+   ranking, only the honesty of the "chance it lands" figure, which would
+   otherwise read a third too low.
+4. **The market is a strong opponent.** This project's own backtest found that
    when the model's pick and the tote favourite disagreed, *the favourite won
    more often*. So the model/market blend defaults to only **0.35** weight on
-   our own model. Raising it makes the engine bolder and, on the evidence,
-   worse. The slider in the Daily Parlays tab says so.
+   our own model, and the jackpot planner starts at **0**.
 
-Place probabilities use the **discounted Harville** model (Lo &
-Bacon-Shone), not plain Harville. Plain Harville treats the race as a sequence
-of independent draws and therefore *overstates* how often a short-priced horse
-fills a minor placing -- good horses tend to either win or finish well beaten
-rather than politely collecting third. Backing a favourite to place on raw
-Harville numbers looks like value more often than it is. Place legs also have
-to clear a higher EV bar than win legs (5% vs 3%), because a place probability
-is derived through a model whose residual error we can't see, where a win
-probability is measured straight against a quoted win price.
+Place probabilities use the **discounted Harville** model (Lo & Bacon-Shone),
+not plain Harville. Plain Harville treats the race as a sequence of independent
+draws and therefore *overstates* how often a short-priced horse fills a minor
+placing. Place legs also have to clear a higher EV bar than win legs (5% vs 3%),
+because a place probability is derived through a model whose residual error we
+can't see.
 
 ## Scoring: technicals + fundamentals
 
 Composite score per horse blends six things, mapped to within-race win
 probability via softmax:
 
-- **35% official handicap rating** (normalized within the field) -- the
-  richest single technical signal.
-- **15% recency-weighted recent form** (last-5 placings, RWITC only for now).
-- **12% jockey strike rate + 13% trainer strike rate** -- official
-  season-to-date stats scraped from each club's own published pages
-  (`jockeyStatistics.php`/`trainerStatistics.php` on RWITC,
-  `Home/JockeyStats`/`home/trainerstats` on BTC), Bayesian-shrunk toward the
+- **35% official handicap rating** (normalized within the field) — the richest
+  single technical signal.
+- **15% recency-weighted recent form** (last-5 placings).
+- **12% jockey strike rate + 13% trainer strike rate** — official season-to-date
+  stats scraped from each club's own published pages, Bayesian-shrunk toward the
   venue's population-average win% so a jockey with 3 rides and 2 wins doesn't
-  outrank a proven rider with 150 rides -- see `models/connections.py`.
-- **13% owner strike rate + 12% breeder/stud strike rate** -- self-derived
-  from our own backfilled results archive (`self_derived_strike_rate` in
-  `models/connections.py`), pooled across all three venues since ownership
-  and breeding operations aren't venue-local the way jockeys/trainers are.
-  Neither club publishes a breeder leaderboard, and only RWITC publishes an
-  owner one, so this is the one signal here that isn't from an official
-  source -- it's only as good as the seasons we've backfilled, and the same
-  Bayesian shrinkage applies. RWITC's official season **Money Leaders**
-  (Owners/Jockeys/Horses/Trainers by winnings, `moneyLeaders.php`) is scraped
-  and shown in the Connections tab as a reference for which operations are
-  established and well-resourced, but deliberately *not* fed into the score,
-  to avoid mixing an earnings-based ranking with the win-rate-based signals
-  above.
-- **+0.08 flat bonus** when an owner's name plausibly overlaps with the
-  race's own sponsor/title text (`owner_sponsor_match` in
-  `models/connections.py`) -- races in India are routinely named after their
-  owner/breeder sponsors, and it's a real, entirely public pattern that
-  connections occasionally target "their own" race. Checked and verified
-  correct (True/False cases including surname-only matches), but across our
-  current 411-race backfilled sample it never actually fired -- sponsor-named
-  races are a minority of any card, and it's an opportunistic signal, not a
-  constant one. It'll surface for real once it happens to line up on a live
-  card; the Connections tab has a dedicated section for it.
+  outrank a proven rider with 150 rides — see `models/connections.py`.
+- **13% owner strike rate + 12% breeder/stud strike rate** — self-derived from
+  our own backfilled results archive, pooled across venues since ownership and
+  breeding operations aren't venue-local the way jockeys and trainers are. This
+  is the one signal not from an official source. RWITC's official season **Money
+  Leaders** is scraped and shown in the Connections tab as a reference, but
+  deliberately *not* fed into the score, to avoid mixing an earnings-based
+  ranking with win-rate-based signals.
+- **+0.08 flat bonus** when an owner's name plausibly overlaps with the race's
+  own sponsor/title text — races in India are routinely named after their
+  owner/breeder sponsors, and it's a real, public pattern that connections
+  occasionally target "their own" race. Verified correct on True/False cases,
+  but across the current 511-race sample it has never actually fired.
 
-Refresh the jockey/trainer/money-leader stats anytime via the sidebar/tab
-"Refresh" buttons; owner/breeder stats are always computed live from
-whatever's currently backfilled, no refresh needed. Browse full leaderboards
-per venue in the **Connections** tab.
-
-Staking is edge-over-random-pick (no pre-race tote odds are published by
-either site, so true odds-based Kelly isn't possible yet -- see
-`models/staking.py` docstring). Races where no horse clears a minimum edge
-are correctly skipped, not force-picked.
+Refresh jockey/trainer/money-leader stats anytime via the sidebar buttons;
+owner/breeder stats are computed live from whatever's backfilled.
 
 ## Backtest & weight tuning
 
-`python scripts/backtest.py [--venue Pune] [--tune]` replays every archived
-race with results and benchmarks the model's top pick against the **tote
-favourite** (the betting public's collective prediction -- the strongest
-verifiable benchmark, since racingpulse's selections are paywalled and free
-tip blogs keep no checkable archive), the top-rated horse, and a random
-pick. Also shown in the app's **Backtest** tab.
+`python scripts/backtest.py [--venue Pune] [--tune]` replays every archived race
+with results and benchmarks the model's top pick against the **tote favourite**,
+the top-rated horse, and a random pick. Also in the app's **Backtest** tab, where
+the scope selector offers whole verticals as well as single venues — because
+that is the level at which a sample gets big enough to say anything.
 
-### The lookahead leak (fixed Aug 2026) -- and why the numbers dropped
+### The lookahead leak (fixed Aug 2026) — and why the numbers dropped
 
-Earlier versions of this section reported a model top-pick rate of ~42%.
-**That number was inflated by a lookahead bug and is not real.** Jockey and
-trainer strike rates came from a current-season snapshot applied
-retroactively, and owner/breeder rates were derived from the whole results
-archive *including the very race being graded*. Every race was effectively
-scored using its own outcome.
+Earlier versions reported a model top-pick rate of ~42%. **That number was
+inflated by a lookahead bug and is not real.** Jockey and trainer strike rates
+came from a current-season snapshot applied retroactively, and owner/breeder
+rates were derived from the whole results archive *including the very race being
+graded*.
 
 It was caught when four new venues were added: Hyderabad backtested at a
-nonsensical **75.7%** top-pick win rate. No handicapping model wins three
-races in four. The tell was that for Hyderabad the entire archive *was* the
-test set, so the leak dominated rather than being diluted across a season.
-
-`compute_composite_scores(..., as_of_date=...)` now rebuilds every derived
-signal from results strictly before the race being scored. Live scoring still
-uses the official current-season snapshot, which is correct -- that genuinely
-is what a punter knows on race day.
+nonsensical **75.7%** top-pick win rate. No handicapping model wins three races
+in four. `compute_composite_scores(..., as_of_date=...)` now rebuilds every
+derived signal from results strictly before the race being scored. Live scoring
+still uses the official current-season snapshot, which is correct — that
+genuinely is what a punter knows on race day.
 
 ### Honest numbers (511 races, leak-free)
 
 | | Top pick | Top-3 | |
 |---|---:|---:|---|
-| **Tote favourite** | **48.5%** | -- | the benchmark to beat |
+| **Tote favourite** | **48.5%** | — | the benchmark to beat |
 | Model top pick | 26.8% | 59.6% | |
-| Top-rated horse | 22.1% | -- | |
-| Random | 12.3% | -- | |
+| Top-rated horse | 22.1% | — | |
+| Random | 12.3% | — | |
 
-Per venue: Pune 28.2%, Mumbai 24.9%, Bangalore 23.9%, Hyderabad 35.1%,
-Mysore 28.0%, Kolkata 28.6% (only 7 races -- ignore it).
+Per venue: Pune 28.2%, Mumbai 24.9%, Bangalore 23.9%, Hyderabad 35.1%, Mysore
+28.0%, Kolkata 28.6% (only 7 races — ignore it).
 
-**The model does not beat the market on any Indian circuit.** That is the
-honest headline, and it is the same conclusion the market-agreement pattern
-has always pointed at: when the model agrees with the favourite it wins 54%
-of the time; when it disagrees it wins 11% while the favourite still wins
-45%. If the board disagrees with the pick here, trust the board.
+**The model does not beat the market on any Indian vertical.** That is the honest
+headline, and it is the same conclusion the market-agreement pattern has always
+pointed at: when the model agrees with the favourite it wins 54% of the time;
+when it disagrees it wins 11% while the favourite still wins 45%. If the board
+disagrees with the pick here, trust the board. It is also the reason the jackpot
+planner ranks legs by the market rather than by the model.
 
 ### On the Aug 2026 signal additions
 
-Weight carried, distance/class-aware form, days-since-run, course &
-distance, sire strike rate, rating gap and equipment change were all added
-in one pass (see `models/form.py`). Measured effect: **24.7% -> 26.4%**,
-which a McNemar paired test rates **not statistically significant**
-(chi-sq 1.36, needs >3.84 for p<0.05). A grid search found no better weight
-configuration. They are kept because they're cheap, principled, and should
-help as data grows -- but they are not a proven improvement, and this README
-will not claim they are.
+Weight carried, distance/class-aware form, days-since-run, course & distance,
+sire strike rate, rating gap and equipment change were all added in one pass (see
+`models/form.py`). Measured effect: **24.7% → 26.4%**, which a McNemar paired
+test rates **not statistically significant** (chi-sq 1.36, needs >3.84 for
+p<0.05). A grid search found no better weight configuration. They are kept
+because they're cheap and principled, but they are not a proven improvement.
 
-With ~500 races the 95% confidence interval on any hit rate is about
-+/-4pp, which is wider than every effect measured in that pass. **Sample
-size, not signal count, is now the binding constraint.**
+With ~500 races the 95% confidence interval on any hit rate is about ±4pp, which
+is wider than every effect measured in that pass. **Sample size, not signal
+count, is now the binding constraint.**
 
-## Phase 2 (as the season's data accumulates)
+## Phase 2
 
-Ordered by expected value now that the leak is fixed and the cheap signals
-are in. The honest lesson from the Aug 2026 pass is that **adding more
-features to ~500 races doesn't move the needle** -- the top two items below
-are about sample size and objective measurement, not more features.
-
-- **More archived races.** Every effect worth chasing is currently smaller
-  than the +/-4pp confidence interval. Backfilling more seasons is the single
-  highest-value action available, and it's just runtime.
+- **More archived races.** Every effect worth chasing is currently smaller than
+  the ±4pp confidence interval. Backfilling more seasons is the highest-value
+  action available, and it's just runtime.
+- **Forecast-vs-SP rank agreement.** The jackpot planner's measured hit rates
+  rest on starting-price ranks, which are not available at ticket time. The
+  odds-snapshot archive answers how much is lost using race-morning forecast
+  ranks instead — currently 7 races, which is nothing.
+- **More pool dividends.** 46 settlements archived so far. The break-even
+  comparison in the planner gets meaningful somewhere around 50-100 per pool
+  family, per club.
 - **Real speed figures** (time vs. par, adjusted for weight/going).
-  `data/standard_timings.pdf` is already parsed but never used to build one;
-  `runs.recent_runs_json` now preserves the per-run times needed. This is the
-  biggest untapped signal, because it's an objective performance measure
-  rather than the handicapper's opinion.
+  `data/standard_timings.pdf` is parsed but never used to build one;
+  `runs.recent_runs_json` preserves the per-run times needed. This is the biggest
+  untapped signal, because it's an objective performance measure rather than the
+  handicapper's opinion.
 - Jockey-trainer *combo* strike rates (currently scored independently), draw
   bias, going bias.
-- Rolling 30-day trainer/jockey form instead of season-to-date, to catch
-  hot/cold streaks the season average smooths away.
-- racingpulse.in / indiarace.com as secondary sources if useful gaps remain.
-- Calibration dashboard (already scaffolded in the Bankroll tab) will start
-  producing meaningful numbers once enough bets are logged with outcomes.
-- Owner/breeder self-derived stats will get more reliable as more seasons
-  get backfilled -- currently pooled from ~411 races across 3 venues, which
-  is still a thin sample for anything but the most prolific operations.
+- Rolling 30-day trainer/jockey form instead of season-to-date.
+- Calibration dashboard (scaffolded in the Bankroll tab) will start producing
+  meaningful numbers once enough bets are logged with outcomes.
 
 ## Known limitations
 
-- **India:** no automatic price feed exists, so EV is only as current as the
-  last price you pasted. With nothing pasted, staking falls back to
-  confidence-tiered rather than true expected-value. Note also that Indian
-  tote takeout is far heavier than an Australian book -- the engine puts a
-  three-leg India multi at roughly **49%** to takeout, which is why almost
-  nothing clears the margin test on that circuit.
-- **Australia:** live prices come from NZ TAB, which is a *different book* from
-  wherever you place bets. An edge measured against NZ TAB's price is not an
-  edge at your bookmaker unless their price is as long -- always confirm before
-  staking. Prices also move, so a fetch from three hours ago is a fictional
-  edge; re-run before betting.
-- **Big fields get skipped.** The engine only models fields of 5-16, and
-  Australian country meetings routinely card 17-18 runners. On a real Port
-  Macquarie card that excluded 4 of 8 races. Raise `MAX_FIELD_SIZE` in
-  `models/parlay.py` if you want them, but be aware those races are genuinely
-  harder to forecast.
-- Racing Australia publishes no jockey/trainer strike-rate leaderboard,
-  so on the AU and HK circuits those signals build up from your own archived
-  results; run `python -m scripts.daily --backfill 21` before expecting the
-  connections signal to mean anything.
-- **Hong Kong:** in season only (September to mid-July), and the race-card
-  parser is unverified until the new season opens -- see Data sources.
+- **No live price feed exists**, so EV is only as current as the last price you
+  pasted. With nothing pasted, staking falls back to confidence-tiered rather
+  than true expected-value. Indian tote takeout is heavy — the engine puts a
+  three-leg multi at roughly **43%** to takeout, which is why almost nothing
+  clears the margin test.
+- **The jackpot replay ranks on starting prices**, which are only known after
+  each race. It is an upper bound on what the same method does off race-morning
+  forecast prices.
+- **Delhi has no archive at all.** Every derived signal there falls back to the
+  cross-venue pool. Kolkata (14 races) and Mysore (25) are barely better.
+- **Big fields get skipped by the parlay engine.** It only models fields of
+  5-16; raise `MAX_FIELD_SIZE` in `models/parlay.py` if you want them, but be
+  aware those races are genuinely harder to forecast. The jackpot planner has no
+  such limit — a wide field is just an expensive leg.
 - **The parlay engine's probabilities are unproven.** The Followup tab's
-  calibration table is the thing to watch: if slips predicted to land 25% of
-  the time land 12% of the time, the model is overconfident and every stake it
+  calibration table is the thing to watch: if slips predicted to land 25% of the
+  time land 12% of the time, the model is overconfident and every stake it
   suggests is too big. It takes 30-50 settled slips before that table says
-  anything real, and until then every number in the app should be treated as a
-  hypothesis.
+  anything real.
 - `use_container_width` is deprecated in the installed Streamlit and warns on
-  every render. Harmless today, but it's scheduled for removal and the whole
-  file will need `width='stretch'` at some point.
-- Speed figures aren't implemented yet (Phase 2) -- ranking currently uses
-  rating + form + connections only.
+  every render. Harmless today, but scheduled for removal.
+- Speed figures aren't implemented yet — ranking uses rating + form +
+  connections only.
 - Parsers are regex/line-position based against RWITC's legacy HTML; if the
-  site's markup changes, `scrapers/rwitc.py` will need re-validating against
-  a fresh sample page.
-- Jockey/trainer stats are club-wide season snapshots, not filtered to a
-  specific meeting or track condition -- refresh them periodically rather
-  than trusting a stale pull from weeks ago.
-- BTC's racecard doesn't expose a "Breeder" field, only "Stud" -- the
-  breeder signal falls back to stud name for Bangalore horses, which is
-  usually but not always the same operation.
-- Owner/breeder strike rates use whatever's currently in `results` at query
-  time, including same-day results for races already run -- there's no
-  point-in-time cutoff, so re-scoring a past race day isn't a strict
-  backtest (a known simplification, not silently hidden).
+  site's markup changes, `scrapers/rwitc.py` needs re-validating against a fresh
+  sample page.
+- Jockey/trainer stats are club-wide season snapshots, not filtered to a track
+  condition — refresh them periodically rather than trusting a stale pull.
+- Owner/breeder strike rates use whatever's in `results` at query time in live
+  scoring, so re-scoring a past race day through the UI isn't a strict backtest.
+  `scripts/backtest.py` does apply a point-in-time cutoff.
 
 ## Place bets (top-2 / top-3)
 
-A dedicated **Place Bets** tab derives each horse's probability of finishing
-in the paid places from the win model (Harville order statistics), and flags
-🎯 **VALUE** — consistent placers (high place %, low win %) the crowd tends to
+A dedicated **Place Bets** tab derives each horse's probability of finishing in
+the paid places from the win model (Harville order statistics), and flags 🎯
+**VALUE** — consistent placers (high place %, low win %) the crowd tends to
 underprice in the place pool. Places paid are verified empirically from RWITC
-tote dividends: **8+ runners → 3 places, 5–7 → 2, ≤4 → win-only**. Lower
-variance than win betting, not higher edge — the same fair-odds discipline
-applies (fair place odds = 100 ÷ place% − 1), and there are no pre-race place
-odds published, so it's a shortlist to price up at the board.
+tote dividends: **8+ runners → 3 places, 5–7 → 2, ≤4 → win-only**. Lower variance
+than win betting, not higher edge — the same fair-odds discipline applies (fair
+place odds = 100 ÷ place% − 1), and there are no pre-race place odds published,
+so it's a shortlist to price up at the board.

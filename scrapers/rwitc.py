@@ -499,6 +499,103 @@ def _parse_dividends(block: list[str], start: int) -> dict:
     return d
 
 
+# Multi-leg pools RWITC settles at the foot of a result page. Each sits in its
+# own little table whose first <th> is the pool name and whose rows are
+# label/value pairs -- Legs, Winners, then either a dividend and ticket count
+# or a Carried Forward amount.
+POOL_HEADING_RE = re.compile(
+    r"^(SUPER JACKPOT|MINI JACKPOT|JACKPOT|FIRST TREBLE|SECOND TREBLE|THIRD TREBLE|TREBLE)$",
+    re.I)
+# The jackpot pays in two tiers: 70% of the pool to tickets with all legs
+# right, 30% to those one leg short. They are different bets with wildly
+# different dividends, so they are stored as separate rows rather than
+# averaged into one meaningless number.
+TIER_RE = re.compile(r"^(\d+)%\s*Div$", re.I)
+
+
+def parse_pool_dividends(html: str) -> list[dict]:
+    """Jackpot / treble settlements from an RWITC result page.
+
+    Returns [{'pool', 'tier', 'legs', 'winners', 'dividend', 'tickets',
+    'carried_forward'}]. Two fields here exist nowhere else in the pipeline:
+
+    'legs' is which races actually made up the pool. The jackpot is usually
+    the last five races and the trebles consecutive triples, but the club
+    chooses per meeting -- on 24 Jul 2026 the Super Jackpot ran races 4-9 and
+    on 8 Aug 2026 races 3-8 -- so a planner that assumes the shape is planning
+    the wrong bet on some days.
+
+    'tickets' is how many tickets shared the dividend, which is the number
+    that makes a pari-mutuel pool honest. A dividend is not a price; it is the
+    pool split among whoever held that line. Recorded together they say what a
+    winning ticket really returned: 84,160 shared by 70 tickets on 8 Aug 2026,
+    52 shared by 3,781 on a day when the favourites all obliged.
+
+    Returns [] on a page without these tables, which is the normal case for a
+    card too small to carry a jackpot -- not an error.
+    """
+    soup = BeautifulSoup(html, "lxml")
+    out = []
+    for table in soup.find_all("table"):
+        head = table.find("th")
+        if not head:
+            continue
+        name = head.get_text(" ", strip=True)
+        if not POOL_HEADING_RE.match(name):
+            continue
+        fields: dict = {}
+        for tr in table.find_all("tr")[1:]:
+            cells = [c.get_text(" ", strip=True) for c in tr.find_all(["th", "td"])]
+            # Rows are label/value, and the dividend row carries two pairs
+            # ("70% Div | 84,160 | Tickets | 70") on one line.
+            for j in range(0, len(cells) - 1, 2):
+                if cells[j]:
+                    fields[cells[j]] = cells[j + 1]
+        legs = fields.get("Legs")
+        winners = fields.get("Winners")
+        carried = _money(fields.get("Carried Forward"))
+        tiers = [(TIER_RE.match(k).group(1) + "%", v)
+                 for k, v in fields.items() if TIER_RE.match(k)]
+        if tiers:
+            # RWITC prints both tiers' ticket counts under the same "Tickets"
+            # label, so a dict keeps only the last. Re-read them positionally
+            # from the rows instead of guessing.
+            counts = _tier_ticket_counts(table)
+            for i, (tier, value) in enumerate(tiers):
+                out.append({"pool": name.upper(), "tier": tier, "legs": legs,
+                            "winners": winners, "dividend": _money(value),
+                            "tickets": counts[i] if i < len(counts) else None,
+                            "carried_forward": None})
+        else:
+            out.append({"pool": name.upper(), "tier": "main", "legs": legs,
+                        "winners": winners, "dividend": _money(fields.get("Div")),
+                        "tickets": _int(fields.get("Tickets")),
+                        "carried_forward": carried})
+    return out
+
+
+def _tier_ticket_counts(table) -> list[int | None]:
+    counts = []
+    for tr in table.find_all("tr"):
+        cells = [c.get_text(" ", strip=True) for c in tr.find_all(["th", "td"])]
+        if any(TIER_RE.match(c) for c in cells):
+            counts.append(next((_int(cells[i + 1]) for i, c in enumerate(cells[:-1])
+                                if c.lower() == "tickets"), None))
+    return counts
+
+
+def _money(text: str | None) -> float | None:
+    if not text:
+        return None
+    m = re.search(r"[\d,]+(?:\.\d+)?", text)
+    return float(m.group(0).replace(",", "")) if m else None
+
+
+def _int(text: str | None) -> int | None:
+    v = _money(text)
+    return int(v) if v is not None else None
+
+
 def parse_standard_timings(pdf_path: Path) -> dict:
     """Parse RWITC's standard_timings.pdf into {track: {class: {distance_m: seconds}}}."""
     import pdfplumber

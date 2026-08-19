@@ -1,24 +1,27 @@
 """Getting bookmaker prices into the app.
 
-The whole EV engine is worthless without a price to measure against, and
-prices are the one thing that is genuinely hard to obtain from India. What
-actually happens when you try, tested from this machine in July 2026:
+The whole EV engine is worthless without a price to measure against, and no
+Indian club publishes a live machine-readable board. What is actually
+available, tested against real meetings in Aug 2026:
 
-  Racing Australia results (SP)   works       -- but only AFTER the race
-  HKJC win odds / dividends       works       -- in season only (Sep to mid-Jul)
-  TAB.com.au public API           geo-blocked -- serves an "unavailable in your region" page
-  punters.com.au, racenet.com.au  403         -- CloudFront blocks the request outright
+  indiarace forecast prices    works -- but INDICATIVE, published only on race
+                                        day, and covering only the front 4-5
+                                        runners of each field (42-62% of it)
+  club result pages (SP)       works -- exact, and available only AFTER the race
+  a live tote board            exists only at the track and on screens; nothing
+                                        machine-readable serves it
 
-So there is no free, reliable, automatic source of LIVE Australian prices from
-here. Rather than pretend otherwise, this module offers four honest paths, in
-descending order of convenience:
+So the price that decides a bet is one you have to look at and type. Rather
+than pretend otherwise, this module offers three honest paths, in descending
+order of reliability:
 
-  1. paste_odds()      -- copy the prices off any screen and paste them in.
-                          Always works, needs nothing, no account, no key.
-  2. HKJC scraping      -- automatic, in season (see scrapers/hkjc.py).
-  3. Racing Australia SP -- automatic but post-race: useless for betting,
-                          essential for checking whether the model is any good.
-  4. fetch_from_api()   -- a generic adapter for a bookmaker API you already
+  1. paste_odds()      -- copy the prices off any screen -- tote board,
+                          exchange, bookmaker app -- and paste them in. Always
+                          works, needs nothing, no account, no key.
+  2. indiarace forecast -- automatic on race day (see scrapers/indiarace.py).
+                          Enough to rank a field and to pick jackpot legs; not
+                          enough of the field to de-vig into an EV figure.
+  3. fetch_from_api()   -- a generic adapter for a bookmaker API you already
                           have access to, configured entirely by environment
                           variables.
 

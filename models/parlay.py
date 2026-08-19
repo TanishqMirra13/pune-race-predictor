@@ -1,12 +1,12 @@
 """Daily parlay (multi) builder, with the expected-value test applied first.
 
 A multi is the worst-priced product on any betting board, and the reason is
-arithmetic rather than opinion. Every leg is priced with the bookmaker's
-margin already inside it, and combining legs multiplies those margins together.
-Three legs into a 16% book means betting into a 36% margin; four legs into a
-Hong Kong all-up means roughly 44% gone to takeout before anyone has had an
-opinion about a horse. There is no staking plan, bankroll rule or selection
-method that overcomes a 36% head start.
+arithmetic rather than opinion. Every leg is priced with the tote's takeout
+already inside it, and combining legs multiplies those margins together. The
+median complete Indian starting-price book in this archive comes to an
+overround of 1.203 -- about 17% -- so three legs means betting into roughly a
+43% margin before anyone has had an opinion about a horse. There is no staking
+plan, bankroll rule or selection method that overcomes a 43% head start.
 
 That leaves exactly one condition under which a multi is worth placing, and
 this module enforces it:
@@ -141,7 +141,7 @@ def _confidence_ok(entry: dict) -> bool:
 def qualify_legs(slate: list[dict], model_weight: float = DEFAULT_MODEL_WEIGHT,
                  min_ev: float = MIN_LEG_EV, min_probability: float = MIN_LEG_PROBABILITY,
                  min_odds: float = MIN_LEG_ODDS, max_odds: float = MAX_LEG_ODDS,
-                 circuit: str = "Australia") -> tuple[list[dict], list[dict]]:
+                 ) -> tuple[list[dict], list[dict]]:
     """Find every individually +EV selection across the day's races.
 
     slate entries look like:
@@ -208,7 +208,7 @@ def qualify_legs(slate: list[dict], model_weight: float = DEFAULT_MODEL_WEIGHT,
         # priced -- see MIN_PLACE_PRICE_COVERAGE. With a gap in the field the
         # number is not merely noisy, it is wrong in a specific and dangerous
         # direction: too high.
-        n_places = places_paid(field_size, circuit)
+        n_places = places_paid(field_size)
         place_probs = {}
         if n_places and coverage >= MIN_PLACE_PRICE_COVERAGE:
             win_map = {e["horse_id"]: (e["horse_name"], p) for e, p in zip(priced, blended)}
@@ -236,7 +236,6 @@ def qualify_legs(slate: list[dict], model_weight: float = DEFAULT_MODEL_WEIGHT,
                     "venue": race.get("venue"),
                     "race_no": race.get("race_no"),
                     "race_time": race.get("race_time"),
-                    "circuit": race.get("circuit", circuit),
                     "horse_name": entry["horse_name"],
                     "market": market,
                     "decimal_odds": price,
@@ -359,11 +358,10 @@ def _dedupe_overlapping(suggestions: list[dict], max_shared: int = 1) -> list[di
 
 def daily_parlay_card(slate: list[dict], bankroll: float,
                       model_weight: float = DEFAULT_MODEL_WEIGHT,
-                      circuit: str = "Australia",
                       profiles: tuple = ("safe", "balanced", "aggressive")) -> dict:
     """The full daily suggestion: qualified legs, then one set of multis per
     risk profile, plus the honest summary of what was rejected and why."""
-    legs, rejected = qualify_legs(slate, model_weight=model_weight, circuit=circuit)
+    legs, rejected = qualify_legs(slate, model_weight=model_weight)
 
     by_profile = {}
     for name in profiles:
@@ -382,17 +380,16 @@ def daily_parlay_card(slate: list[dict], bankroll: float,
 
     total = sum(len(v["parlays"]) for v in by_profile.values())
     return {
-        "circuit": circuit,
         "legs": legs,
         "rejected_races": rejected,
         "profiles": by_profile,
         "total_suggestions": total,
         "singles": singles_shortlist(legs, bankroll),
-        "verdict": _verdict(legs, total, circuit),
+        "verdict": _verdict(legs, total),
     }
 
 
-def _verdict(legs: list[dict], total_suggestions: int, circuit: str) -> str:
+def _verdict(legs: list[dict], total_suggestions: int) -> str:
     if not legs:
         return ("No selection anywhere on today's card is priced longer than our estimate of its "
                 "true chance, so there is no multi worth placing. This is the ordinary outcome of "
@@ -402,8 +399,8 @@ def _verdict(legs: list[dict], total_suggestions: int, circuit: str) -> str:
                 f"the multi threshold once the compounded margin is taken out. Back the singles if you "
                 f"back anything; skip the multi.")
     return (f"{len(legs)} selections are priced above our fair odds, and {total_suggestions} combinations "
-            f"survive the margin test. A three-leg multi on the {circuit} circuit still gives up about "
-            f"{compound_takeout(circuit, 3) * 100:.0f}% to takeout, so treat the stake sizes below as "
+            f"survive the margin test. A three-leg multi into an Indian tote still gives up about "
+            f"{compound_takeout(3) * 100:.0f}% to takeout, so treat the stake sizes below as "
             f"ceilings, not targets.")
 
 

@@ -115,13 +115,12 @@ CREATE TABLE IF NOT EXISTS ratings_history (
     source TEXT
 );
 
--- Market prices, one row per (race, horse, market, source). Unlike the Indian
--- clubs -- which publish no pre-race odds at all -- Racing Australia prints a
--- starting price for every runner and HKJC publishes live win odds, so for
--- the AU/HK circuits we finally have a market to price ourselves against.
--- 'source' distinguishes a live bookmaker board from a settled starting
--- price, because only the former is bettable and only the latter is honest
--- for backtesting.
+-- Market prices, one row per (race, horse, market, source). No Indian club
+-- publishes a machine-readable live board, but indiarace posts a race-day
+-- forecast price and every club prints a settled starting price on its result
+-- page, so there is a market to measure against either way. 'source'
+-- distinguishes them, because only a pre-race quote is bettable and only the
+-- settled price is honest for backtesting.
 CREATE TABLE IF NOT EXISTS market_odds (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     race_id INTEGER NOT NULL REFERENCES races(id),
@@ -160,6 +159,37 @@ CREATE TABLE IF NOT EXISTS odds_snapshots (
     decimal_odds REAL NOT NULL,
     captured_at TEXT DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(race_id, horse_id, source, stage)
+);
+
+-- Multi-leg tote pools (Jackpot, Super Jackpot, Mini Jackpot, the trebles) as
+-- the club published them on its own result page.
+--
+-- Two things live here that exist nowhere else in this schema. First, which
+-- races made up each pool: Indian clubs choose the legs per meeting, and while
+-- the jackpot is usually the last five races, "usually" is not something to
+-- plan a ticket on -- this records what it actually was. Second, the dividend
+-- AND the number of tickets that shared it, which is the only way to say
+-- anything honest about a pari-mutuel pool: the dividend is not a price, it is
+-- the pool divided by however many people held the same line, so a break-even
+-- figure is meaningless without a record of what these pools really pay.
+--
+-- One row per (date, venue, pool, tier). RWITC's jackpot pays two tiers -- a
+-- 70% dividend for all legs and 30% for one short -- so tier separates them;
+-- everything else is 'main'. A carried-forward pool has no dividend and no
+-- tickets, only carried_forward, which is itself worth knowing since it is the
+-- money sitting in next week's pool.
+CREATE TABLE IF NOT EXISTS pool_dividends (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    race_date TEXT NOT NULL,
+    venue TEXT NOT NULL,
+    pool TEXT NOT NULL,
+    tier TEXT NOT NULL DEFAULT 'main',
+    legs TEXT,
+    winners TEXT,
+    dividend REAL,
+    tickets INTEGER,
+    carried_forward REAL,
+    UNIQUE(race_date, venue, pool, tier)
 );
 
 -- A suggested (and possibly placed) multi/parlay. Stored whole so the daily
@@ -252,10 +282,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
     race_cols = {row["name"] for row in conn.execute("PRAGMA table_info(races)")}
     if "tote_favourite" not in race_cols:
         conn.execute("ALTER TABLE races ADD COLUMN tote_favourite TEXT")
-    # Added when the Australian and Hong Kong circuits were wired in. 'circuit'
-    # is the coarse grouping the app filters on (India / Australia / Hong Kong)
-    # while 'venue' stays the individual track, so a Pune card and a Rosehill
-    # card can coexist in one table without either query seeing the other.
+    # 'circuit' is a coarse grouping kept from when non-Indian circuits were
+    # wired in. Those are gone; every row is now 'India' and every query
+    # filters on it, so a stray foreign row from an old database can never
+    # leak into a backtest or a strike rate. The finer grouping that actually
+    # matters -- which turf authority a venue belongs to -- lives in
+    # models/verticals.py rather than the schema, because it is derived from
+    # the venue name and gains nothing from being stored per race.
     for col, decl in (
         ("circuit", "TEXT"),
         ("country", "TEXT"),
@@ -307,6 +340,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_races_date_circuit ON races(race_date, circuit)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_market_odds_race ON market_odds(race_id, market)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_odds_snapshots_race ON odds_snapshots(race_id, stage)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_pool_dividends_meeting "
+                 "ON pool_dividends(race_date, venue)")
 
 
 if __name__ == "__main__":

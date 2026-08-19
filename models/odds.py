@@ -1,19 +1,21 @@
 """Market odds -> fair probabilities, edge, and stake size.
 
-This module exists because the Australian and Hong Kong circuits give us
-something the Indian ones never did: a published price for every runner. That
-changes what the app can honestly claim. Phase 1 could only rank horses. With
-a market present we can ask the only question that actually decides whether a
-bet makes money -- is this price longer than the horse's true chance? -- and
-refuse the bet when the answer is no.
+This module exists because a price turns a ranking into a decision. Without
+one the app can only say which horse it likes; with one it can ask the
+question that actually decides whether a bet makes money -- is this price
+longer than the horse's true chance? -- and refuse the bet when the answer is
+no. Indian racing supplies two prices: indiarace's race-day forecast, which is
+indicative and covers only the front of the field, and the settled starting
+price every club prints on its result page, which is exact and arrives too
+late to bet.
 
 The three ideas everything here rests on:
 
-1. A bookmaker's prices do not sum to 100%. They sum to more, and the excess
-   is the margin ("overround"). On a 12-runner Australian race the book is
-   typically 115-125%; the Hong Kong win pool takes out about 17.5% by rule.
-   You must strip that margin before the market's prices can be compared to
-   anything.
+1. A book does not sum to 100%. It sums to more, and the excess is the margin
+   ("overround"). Measured over 396 complete Indian starting-price books the
+   median is 1.203 -- about 17% of every rupee gone before anyone has an
+   opinion. You must strip that margin before a market price can be compared
+   to anything.
 
 2. Stripping it proportionally is the wrong way to do it. Racing markets show
    a persistent favourite-longshot bias: longshots are systematically overbet
@@ -31,8 +33,12 @@ The three ideas everything here rests on:
    heavily than the model: the model's job is to nudge a market price, not to
    overrule it.
 
-Nothing here assumes a currency -- decimal odds are unitless -- so the same
-functions serve AUD fixed odds, HKD tote dividends and INR stakes alike.
+One caveat measured rather than assumed: on Indian tote books the power
+method still leaves the front of the market underpriced. Summing the top three
+de-vigged probabilities gives 72% where the winner came from that top three
+80% of the time. models/jackpot.py carries the correction and the evidence for
+it; anything here that reports a raw de-vigged probability is reporting the
+uncorrected number.
 """
 import math
 
@@ -45,12 +51,12 @@ DEFAULT_MODEL_WEIGHT = 0.35
 # but no quoted place price and have to estimate one.
 ASSUMED_PLACE_OVERROUND = 1.18
 
-# Published pari-mutuel takeouts, for warning purposes.
-TAKEOUT_BY_CIRCUIT = {
-    "Hong Kong": 0.175,   # HKJC win pool
-    "Australia": 0.145,   # TAB win pool; fixed-odds books are usually cheaper
-    "India": 0.20,        # Indian tote pools, approximate
-}
+# What an Indian tote win pool keeps, for warning purposes. Not a published
+# figure but a measured one: the median complete starting-price book in this
+# archive comes to an overround of 1.203, i.e. 1 - 1/1.203 of turnover, across
+# 396 races. Exotic pools (forecast, quinella, jackpot) take out more than
+# this, so a multi-leg warning built on it is conservative.
+INDIA_WIN_TAKEOUT = 1.0 - 1.0 / 1.203
 
 
 # --------------------------------------------------------------------------
@@ -243,19 +249,15 @@ def staking_plan(probability: float, decimal_odds: float, bankroll: float,
 # Place markets
 # --------------------------------------------------------------------------
 
-def places_paid(field_size: int, circuit: str = "Australia") -> int:
-    """How many places the market pays.
+def places_paid(field_size: int) -> int:
+    """How many places the Indian tote pays.
 
-    Australian bookmakers: 8+ runners pay 3, 5-7 pay 2, under 5 no place
-    market. Hong Kong: 7+ pay 3, 4-6 pay 2, under 4 none. These thresholds
-    change the place probability materially, so they are not guesses -- they
-    are each circuit's published rule."""
-    if circuit == "Hong Kong":
-        if field_size >= 7:
-            return 3
-        if field_size >= 4:
-            return 2
-        return 0
+    8+ runners pay 3, 5-7 pay 2, 4 or fewer have no place pool at all. Not a
+    guess: verified against RWITC's own published dividends, where a race with
+    a place pool always shows three place figures above eight runners and two
+    below. The threshold changes a place probability materially, and it is
+    computed from the DECLARED field, so a late scratching can genuinely drop
+    a race from three places to two."""
     if field_size >= 8:
         return 3
     if field_size >= 5:
@@ -285,8 +287,8 @@ def discounted_place_probabilities(win_probs: dict, n_places: int,
     with lam < 1 and mu < lam, which flattens the field for the minor placings.
     The defaults are the values fitted to thoroughbred racing in that
     literature. Setting lam = mu = 1.0 recovers plain Harville exactly, which
-    is what models/staking.py still uses for the Indian circuits so its
-    published numbers do not silently change.
+    is what models/staking.py's Place Bets shortlist still uses, so the
+    numbers published there do not silently change under it.
 
     win_probs: {horse_id: (name, probability)}. Returns {horse_id: probability}.
     """
@@ -370,11 +372,12 @@ def parlay_margin_drag(leg_overrounds: list[float]) -> float:
     return (product - 1.0) / product
 
 
-def compound_takeout(circuit: str, legs: int) -> float:
-    """Pari-mutuel equivalent of the above: what an all-up/multi bet loses to
-    takeout alone before any opinion is expressed."""
-    t = TAKEOUT_BY_CIRCUIT.get(circuit, 0.15)
-    return 1.0 - (1.0 - t) ** legs
+def compound_takeout(legs: int) -> float:
+    """Pari-mutuel equivalent of the above: what a multi loses to takeout alone
+    before any opinion is expressed. Three legs into an Indian tote is roughly
+    43% gone at the start, which is why almost nothing clears the margin
+    test."""
+    return 1.0 - (1.0 - INDIA_WIN_TAKEOUT) ** legs
 
 
 # --------------------------------------------------------------------------

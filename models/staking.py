@@ -1,14 +1,19 @@
-"""Budget/goal -> staking plan.
+"""Budget/goal -> staking plan, for the price-free view of a card.
 
-Important honesty note: RWITC's race-card page does not publish pre-race tote
-odds (odds only appear after the fact, on the results page). So Phase 1 cannot
-compute a true odds-based expected-value or Kelly stake -- there's no market
-price to compare our model probability against yet. Instead we stake on
-*edge over a random pick* (win_probability vs. 1/field_size), tiered and
-capped, and we simply skip races where no horse clears a minimum edge
-threshold. That's a deliberate feature, not a gap: not betting a weak race is
-part of the discipline. If a live-odds source gets wired in later (Phase 2),
-this can upgrade to true fractional-Kelly.
+Important honesty note: no Indian club publishes a live pre-race board, so
+these functions cannot compute a true odds-based expected value or Kelly
+stake. They stake on *edge over a random pick* (win_probability vs.
+1/field_size), tiered and capped, and skip races where no horse clears a
+minimum edge. That is a deliberate feature rather than a gap: not betting a
+weak race is part of the discipline. Where a price does exist -- the indiarace
+forecast, or one you pasted -- models/parlay.py does the real expected-value
+work instead, and this module is the fallback for everything else.
+
+The jackpot planner that used to live here has moved to models/jackpot.py.
+It was rebuilt rather than relocated: this version ranked legs by the model's
+own probability and spread the budget evenly, and replayed over the archive
+both choices cost most of the hit rate. See that module's docstring for the
+measurements.
 """
 
 MIN_EDGE_TO_BET = 0.05          # below this, skip the race entirely
@@ -18,8 +23,6 @@ EDGE_TIERS = [                   # (min_edge, stake weight multiplier)
     (0.05, 1.0),
 ]
 MAX_STAKE_FRACTION_PER_BET = 0.15   # never stake more than this share of the day's budget on one bet
-FORECAST_JACKPOT_RESERVE = 0.35     # share of budget set aside for forecast/quinella + jackpot, if the user opts in
-BANKER_PROBABILITY_THRESHOLD = 0.35  # top pick strong enough to "banker" a jackpot leg alone
 
 
 def _edge_tier_weight(edge: float) -> float:
@@ -182,45 +185,6 @@ def build_place_shortlist(race_plans: list[dict]) -> list[dict]:
             "picks": picks[:5],
         })
     return out
-
-
-def jackpot_leg_plan(legs: list[dict], unit_cost: float = 5.0, budget: float | None = None) -> dict:
-    """legs: [{'race_no': int, 'entries': [...rating_engine entries, sorted...]}]
-    For each leg: banker (1 horse) if top pick clears BANKER_PROBABILITY_THRESHOLD,
-    else spread the top 2-3 by probability. Returns combo count, cost, and whether it fits budget."""
-    leg_selections = []
-    for leg in legs:
-        entries = leg["entries"]
-        if not entries:
-            leg_selections.append({"race_no": leg["race_no"], "horses": [], "mode": "no data"})
-            continue
-        top = entries[0]
-        if top["win_probability"] >= BANKER_PROBABILITY_THRESHOLD:
-            chosen = [top]
-            mode = "banker"
-        else:
-            chosen = entries[:3] if len(entries) >= 3 else entries
-            mode = "spread"
-        leg_selections.append({
-            "race_no": leg["race_no"],
-            "mode": mode,
-            "horses": [{"horse_name": e["horse_name"], "win_probability": e["win_probability"]} for e in chosen],
-        })
-
-    combo_count = 1
-    for sel in leg_selections:
-        combo_count *= max(len(sel["horses"]), 1)
-    total_cost = combo_count * unit_cost
-
-    fits_budget = budget is None or total_cost <= budget
-    return {
-        "legs": leg_selections,
-        "combo_count": combo_count,
-        "unit_cost": unit_cost,
-        "total_cost": total_cost,
-        "fits_budget": fits_budget,
-        "note": None if fits_budget else "This combination exceeds the jackpot budget -- narrow spread legs to bankers where possible, or lower the unit stake.",
-    }
 
 
 def stop_rules(budget: float, goal: float, cumulative_staked: float, cumulative_pnl: float) -> dict:

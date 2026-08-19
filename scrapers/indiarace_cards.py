@@ -280,8 +280,9 @@ def _horse_cell(td) -> tuple:
         if m:
             # Assumed newest-first, matching RWITC/BTC and the recency weighting
             # in models/rating_engine.py -- NOT cross-checked against a dated run
-            # the way README's Data sources section verifies the Racing Australia
-            # "Last 10" order, so treat this one signal as lower-confidence.
+            # list the way RWITC's order was, so treat this one signal as
+            # lower-confidence. Getting it backwards would silently invert the
+            # form signal at every venue this module serves.
             placings = [p.strip().rstrip(".") for p in m.group(1).split("-")]
             recent_runs = [{"placing": p} for p in placings if p]
     return name, recent_runs, sire, dam
@@ -428,6 +429,77 @@ def parse_raceresult(html: str) -> list[dict]:
     return races
 
 
+# The multi-leg pools sit in their own "Club Jackpot Dividends" table at the
+# foot of a result page, below the per-race dividends. Columns are
+# pool / race numbers / dividend text / winning card numbers.
+_LEGS_SPLIT_RE = re.compile(r"[,&]")
+_PAREN_RE = re.compile(r"\(([^)]*)\)")
+_NUM_RE = re.compile(r"\d[\d,]*")
+
+
+def parse_pool_dividends(html: str) -> list[dict]:
+    """Jackpot / mini-jackpot / treble settlements from an indiarace result page.
+
+    Returns the same shape as rwitc.parse_pool_dividends: [{'pool', 'tier',
+    'legs', 'winners', 'dividend', 'tickets', 'carried_forward'}].
+
+    Why this is worth parsing at all: it is the only published record of (a)
+    which races each pool actually covered, which the club chooses per meeting
+    -- Hyderabad ran its jackpot over races 4-8 on 27 Jul 2026 and races 3-7 on
+    9 Aug -- and (b) how many tickets shared each dividend, without which a
+    pari-mutuel dividend cannot be reasoned about at all.
+
+    THE TWO-DIVIDEND FORMAT, and how the order was settled rather than
+    guessed. A jackpot line reads "9390 & 91296 (TKTS 25 & 06)" with no labels.
+    Multiplying each dividend by its ticket count gives the money paid out of
+    each tier, and on all five two-tier jackpots in the cache those two sums
+    come to a 30.0/70.0 split of one pool -- so the FIRST figure is the
+    consolation tier (one leg short, many more tickets) and the second is the
+    full one. RWITC labels its equivalents "30% Div" and "70% Div" explicitly,
+    which is where the naming comes from and which corroborates the split.
+
+    "47936 C/O (TKT 0)" means nobody hit it and the pool carries forward.
+    """
+    soup = BeautifulSoup(html, "lxml")
+    heading = soup.find(lambda t: t.name == "h4" and "Jackpot Dividends" in t.get_text())
+    if not heading:
+        return []
+    table = heading.find_next("table")
+    if not table:
+        return []
+
+    out = []
+    for tr in table.find_all("tr"):
+        cells = [c.get_text(" ", strip=True) for c in tr.find_all(["th", "td"])]
+        if len(cells) < 3 or cells[0].lower() in ("poll", "pool"):
+            continue
+        pool, legs_raw, payout = cells[0], cells[1], cells[2]
+        legs = ",".join(p.strip() for p in _LEGS_SPLIT_RE.split(legs_raw) if p.strip())
+        winners = cells[3] if len(cells) > 3 else None
+
+        inside = [n for group in _PAREN_RE.findall(payout)
+                  for n in _NUM_RE.findall(group)]
+        outside = _NUM_RE.findall(_PAREN_RE.sub("", payout))
+        amounts = [float(a.replace(",", "")) for a in outside]
+        tickets = [int(t.replace(",", "")) for t in inside]
+
+        if "C/O" in payout.upper():
+            out.append({"pool": pool.upper(), "tier": "main", "legs": legs,
+                        "winners": winners, "dividend": None, "tickets": None,
+                        "carried_forward": amounts[0] if amounts else None})
+            continue
+
+        tiers = ["30%", "70%"] if len(amounts) == 2 else ["main"]
+        for i, amount in enumerate(amounts[:len(tiers)]):
+            out.append({
+                "pool": pool.upper(), "tier": tiers[i], "legs": legs,
+                "winners": winners, "dividend": amount,
+                "tickets": tickets[i] if i < len(tickets) else None,
+                "carried_forward": None,
+            })
+    return out
+
+
 class ForVenue:
     """Binds one venue name to the module-level functions above so this
     module can drop into a {venue: scraper} dispatch table (app.py's
@@ -449,6 +521,9 @@ class ForVenue:
 
     def parse_raceresult(self, html: str) -> list[dict]:
         return parse_raceresult(html)
+
+    def parse_pool_dividends(self, html: str) -> list[dict]:
+        return parse_pool_dividends(html)
 
     def fetch_jockey_stats_html(self, use_cache: bool = True) -> str:
         return fetch_jockey_stats_html(self.venue, use_cache)

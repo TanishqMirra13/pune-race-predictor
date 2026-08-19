@@ -160,8 +160,8 @@ class GenericHttpAdapter(BookmakerAdapter):
         }
 
     def get_price(self, bet: PreparedBet) -> float | None:
-        # Price discovery belongs to the odds layer -- see scrapers/tabnz.py and
-        # scrapers/odds_import.py. Returning None here forces the caller to
+        # Price discovery belongs to the odds layer -- see scrapers/indiarace.py
+        # and scrapers/odds_import.py. Returning None here forces the caller to
         # supply the price it actually saw, which is the safer default: it
         # cannot silently place against a price nobody checked.
         return None

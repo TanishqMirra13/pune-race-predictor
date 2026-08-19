@@ -20,12 +20,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from db.schema import get_connection, init_db
-from db.ingest import store_racecard, store_raceresult
+from db.ingest import store_pool_dividends, store_racecard, store_raceresult
 from scrapers import rwitc, btc, indiarace_cards
+from models import verticals
 
 # Hyderabad/Mysore/Kolkata/Delhi have no scrapable club site of their own --
 # see indiarace_cards.py's module docstring -- so they go through indiarace's
-# unified racing-center pages instead of a dedicated per-club scraper.
+# unified racing-center pages instead of a dedicated per-club scraper. The
+# grouping into verticals lives in models/verticals.py; this table is just the
+# fetch dispatch.
 SCRAPER_BY_VENUE = {
     "Pune": rwitc, "Mumbai": rwitc, "Bangalore": btc,
     "Hyderabad": indiarace_cards.ForVenue("Hyderabad"),
@@ -49,7 +52,7 @@ def backfill(venue: str, start: date, end: date, fetch_cards: bool = True, fetch
     init_db()
     conn = get_connection()
 
-    cards_loaded = results_loaded = days_empty = 0
+    cards_loaded = results_loaded = days_empty = pools_loaded = 0
     for d in daterange(start, end):
         date_str = d.strftime("%Y-%m-%d")
         got_something = False
@@ -74,7 +77,18 @@ def backfill(venue: str, start: date, end: date, fetch_cards: bool = True, fetch
                     store_raceresult(conn, date_str, venue, races)
                     results_loaded += 1
                     got_something = True
-                    print(f"[{date_str}] results: {len(races)} races")
+                    # The jackpot/treble settlements sit in a separate table on
+                    # the same page and are the only record of which races made
+                    # up each pool and how many tickets shared each dividend.
+                    # BTC publishes no such table, hence the AttributeError arm.
+                    try:
+                        pools = source.parse_pool_dividends(html)
+                    except AttributeError:
+                        pools = []
+                    n_pools = store_pool_dividends(conn, date_str, venue, pools) if pools else 0
+                    pools_loaded += n_pools
+                    print(f"[{date_str}] results: {len(races)} races"
+                          + (f", {n_pools} pool settlements" if n_pools else ""))
             except Exception as e:
                 print(f"[{date_str}] result fetch failed: {e}")
 
@@ -82,13 +96,14 @@ def backfill(venue: str, start: date, end: date, fetch_cards: bool = True, fetch
             days_empty += 1
 
     conn.close()
-    print(f"\nDone. {venue}: {cards_loaded} race-card days, {results_loaded} result days, "
+    print(f"\nDone. {venue} ({verticals.vertical_of(venue)}): {cards_loaded} race-card days, "
+          f"{results_loaded} result days, {pools_loaded} pool settlements, "
           f"{days_empty} days with nothing found.")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--venue", required=True, choices=list(SCRAPER_BY_VENUE))
+    parser.add_argument("--venue", required=True, choices=verticals.venue_names())
     parser.add_argument("--start", required=True, help="YYYY-MM-DD")
     parser.add_argument("--end", required=True, help="YYYY-MM-DD")
     parser.add_argument("--cards-only", action="store_true")

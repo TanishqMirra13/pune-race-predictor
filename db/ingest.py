@@ -1,9 +1,12 @@
 """Persist parsed race card / race result / odds data into the SQLite DB.
 
-Originally RWITC-only; now also carries the Australian and Hong Kong circuits,
-whose parsers deliberately emit the same shapes so the storage layer barely had
-to change. The genuinely new pieces are market_odds (there was no market to
-store before) and the parlay tables."""
+Every Indian source -- RWITC, BTC and indiarace -- emits the same parsed
+shapes, so one storage path serves all seven venues and the layer never needs
+to know which club a card came from. The pieces beyond the card/result tables
+are market_odds (prices, whether fetched or pasted), odds_snapshots (the same
+prices kept by stage so the model can eventually be judged against a bettable
+number) and pool_dividends (the multi-leg tote pools, which nothing else in
+the pipeline records)."""
 import json
 import sqlite3
 
@@ -158,139 +161,34 @@ def store_raceresult(conn: sqlite3.Connection, race_date: str, venue: str, races
     conn.commit()
 
 
-def store_intl_racecard(conn: sqlite3.Connection, race_date: str, venue: str, circuit: str,
-                        races: list[dict], country: str | None = None,
-                        source_key: str | None = None) -> int:
-    """Store an Australian or Hong Kong card.
+def store_pool_dividends(conn: sqlite3.Connection, race_date: str, venue: str,
+                         pools: list[dict]) -> int:
+    """Store the meeting's multi-leg pool settlements (jackpot, trebles).
 
-    Same job as store_racecard, but carries the extra columns those circuits
-    give us -- barrier, saddlecloth, race time, track condition -- and tags
-    every race with its circuit so the Indian cards stay in their own world."""
+    Meeting-level rather than per-race, which is why it is a separate call
+    from store_raceresult: a jackpot belongs to the card, not to any one race.
+
+    Upsert on (date, venue, pool, tier) so re-loading a day's results just
+    refreshes. Rows with neither a dividend nor a carry-forward are dropped --
+    those are a parse that found the table but not the numbers, and an empty
+    row would quietly pollute the dividend distribution the planner reads."""
     stored = 0
-    for race in races:
-        if race.get("race_no") is None:
+    for p in pools:
+        if p.get("dividend") is None and p.get("carried_forward") is None:
             continue
         conn.execute(
-            """INSERT INTO races (race_date, venue, race_number, race_name, class_code,
-                                   rating_band_min, rating_band_max, distance_m, going,
-                                   prize_money, circuit, country, race_time_local,
-                                   track_condition, source_key, source_doc)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'racecard')
-               ON CONFLICT(race_date, venue, race_number) DO UPDATE SET
-                   race_name=excluded.race_name, class_code=excluded.class_code,
-                   rating_band_min=excluded.rating_band_min, rating_band_max=excluded.rating_band_max,
-                   distance_m=excluded.distance_m, going=excluded.going,
-                   prize_money=excluded.prize_money, circuit=excluded.circuit,
-                   country=excluded.country, race_time_local=excluded.race_time_local,
-                   track_condition=excluded.track_condition, source_key=excluded.source_key""",
-            (race_date, venue, int(race["race_no"]), race.get("race_name"), race.get("class_code"),
-             race.get("rating_band_min"), race.get("rating_band_max"), race.get("distance_m"),
-             race.get("going"), race.get("prize_money"), circuit, country,
-             race.get("race_time_local"), race.get("track_condition"), source_key),
+            """INSERT INTO pool_dividends
+                   (race_date, venue, pool, tier, legs, winners, dividend, tickets, carried_forward)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(race_date, venue, pool, tier) DO UPDATE SET
+                   legs=excluded.legs, winners=excluded.winners,
+                   dividend=excluded.dividend, tickets=excluded.tickets,
+                   carried_forward=excluded.carried_forward""",
+            (race_date, venue, p["pool"], p.get("tier", "main"), p.get("legs"),
+             p.get("winners"), p.get("dividend"), p.get("tickets"),
+             p.get("carried_forward")),
         )
-        race_id = conn.execute(
-            "SELECT id FROM races WHERE race_date=? AND venue=? AND race_number=?",
-            (race_date, venue, int(race["race_no"])),
-        ).fetchone()["id"]
-
-        for run in race.get("runs", []):
-            horse_id = _get_or_create_horse(conn, run["horse_name"])
-            if run.get("trainer"):
-                conn.execute("UPDATE horses SET current_trainer=? WHERE id=?", (run["trainer"], horse_id))
-            recent_form = ",".join((rr.get("placing") or "?") for rr in run.get("recent_runs", []))
-            conn.execute(
-                """INSERT INTO runs (race_id, horse_id, jockey, trainer, owner, weight_kg, draw,
-                                      barrier, saddlecloth, official_rating, recent_form_text, scratched)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(race_id, horse_id) DO UPDATE SET
-                       jockey=excluded.jockey, trainer=excluded.trainer, owner=excluded.owner,
-                       weight_kg=excluded.weight_kg, draw=excluded.draw, barrier=excluded.barrier,
-                       saddlecloth=excluded.saddlecloth, official_rating=excluded.official_rating,
-                       recent_form_text=excluded.recent_form_text, scratched=excluded.scratched""",
-                (race_id, horse_id, run.get("jockey"), run.get("trainer"), run.get("owner"),
-                 run.get("weight_kg"), run.get("draw"), run.get("draw"), run.get("saddlecloth"),
-                 run.get("official_rating"), recent_form, int(bool(run.get("scratched")))),
-            )
-            stored += 1
-    conn.commit()
-    return stored
-
-
-def store_intl_results(conn: sqlite3.Connection, race_date: str, venue: str, circuit: str,
-                       races: list[dict], country: str | None = None) -> int:
-    """Store AU/HK results, including each runner's starting price.
-
-    The SP goes into runs.odds_sp AND market_odds under source 'sp'. The
-    duplication is deliberate: odds_sp keeps the existing backtest code
-    working unchanged, while market_odds is the general table the EV engine
-    reads, and keeping the two in step here avoids a subtle class of bug where
-    calibration and betting disagree about what the market said."""
-    stored = 0
-    for race in races:
-        if race.get("race_no") is None:
-            continue
-        conn.execute(
-            """INSERT INTO races (race_date, venue, race_number, race_name, class_code, distance_m,
-                                   going, circuit, country, track_condition, source_doc)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'raceresult')
-               ON CONFLICT(race_date, venue, race_number) DO UPDATE SET
-                   race_name=COALESCE(excluded.race_name, races.race_name),
-                   class_code=COALESCE(excluded.class_code, races.class_code),
-                   distance_m=COALESCE(excluded.distance_m, races.distance_m),
-                   going=COALESCE(excluded.going, races.going),
-                   circuit=excluded.circuit, country=COALESCE(excluded.country, races.country)""",
-            (race_date, venue, int(race["race_no"]), race.get("race_name"), race.get("class_code"),
-             race.get("distance_m"), race.get("going"), circuit, country, race.get("track_condition")),
-        )
-        race_id = conn.execute(
-            "SELECT id FROM races WHERE race_date=? AND venue=? AND race_number=?",
-            (race_date, venue, int(race["race_no"])),
-        ).fetchone()["id"]
-
-        fav = (race.get("dividends") or {}).get("favourite")
-        if fav:
-            conn.execute("UPDATE races SET tote_favourite=? WHERE id=?", (fav, race_id))
-
-        for runner in race.get("runners", []):
-            horse_id = _get_or_create_horse(conn, runner["horse_name"])
-            decimal_odds = runner.get("decimal_odds")
-            conn.execute(
-                """INSERT INTO runs (race_id, horse_id, jockey, trainer, weight_kg, draw, barrier,
-                                      saddlecloth, odds_sp, scratched)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(race_id, horse_id) DO UPDATE SET
-                       jockey=COALESCE(excluded.jockey, runs.jockey),
-                       trainer=COALESCE(excluded.trainer, runs.trainer),
-                       weight_kg=COALESCE(excluded.weight_kg, runs.weight_kg),
-                       draw=COALESCE(excluded.draw, runs.draw),
-                       barrier=COALESCE(excluded.barrier, runs.barrier),
-                       saddlecloth=COALESCE(excluded.saddlecloth, runs.saddlecloth),
-                       odds_sp=COALESCE(excluded.odds_sp, runs.odds_sp),
-                       scratched=excluded.scratched""",
-                (race_id, horse_id, runner.get("jockey"), runner.get("trainer"),
-                 runner.get("weight_kg"), runner.get("draw"), runner.get("draw"),
-                 runner.get("saddlecloth"),
-                 (decimal_odds - 1) if decimal_odds and decimal_odds > 1 else None,
-                 int(bool(runner.get("scratched")))),
-            )
-            run_id = conn.execute(
-                "SELECT id FROM runs WHERE race_id=? AND horse_id=?", (race_id, horse_id)
-            ).fetchone()["id"]
-            conn.execute(
-                """INSERT INTO results (run_id, finish_position, time_sec, dividend_place)
-                   VALUES (?, ?, ?, ?)
-                   ON CONFLICT(run_id) DO UPDATE SET
-                       finish_position=excluded.finish_position,
-                       time_sec=COALESCE(excluded.time_sec, results.time_sec),
-                       dividend_place=COALESCE(excluded.dividend_place, results.dividend_place)""",
-                (run_id, runner.get("placing"), _parse_race_time(runner.get("time")),
-                 runner.get("dividend_place")),
-            )
-            if decimal_odds and decimal_odds > 1:
-                _upsert_market_odds(conn, race_id, horse_id, "win", "sp", decimal_odds)
-            if runner.get("dividend_place"):
-                _upsert_market_odds(conn, race_id, horse_id, "place", "sp", runner["dividend_place"])
-            stored += 1
+        stored += 1
     conn.commit()
     return stored
 
@@ -346,21 +244,18 @@ def store_market_odds(conn: sqlite3.Connection, race_date: str, venue: str,
 
 
 def load_market_odds(conn: sqlite3.Connection, race_id: int,
-                     prefer: tuple = ("manual", "api", "live", "tabnz", "indiarace", "sp")) -> dict:
+                     prefer: tuple = ("manual", "api", "indiarace", "sp")) -> dict:
     """{HORSE NAME: {'win': d, 'place': d}} for one race.
 
     Sources are tried in preference order, and the order encodes whose price
-    you can actually get on: 'manual' is what you saw at your own book, 'api'
-    your configured book, 'live' HKJC's official odds, 'tabnz' NZ TAB used as
-    a proxy for the Australian market, 'indiarace' indiarace.com's forecast
-    prices for the Indian circuit, and 'sp' a settled starting price.
-    'sp' ranks last because it cannot be bet -- by the time it exists the race
-    has run -- so treating it as a live quote would invent an opportunity that
-    never existed. 'tabnz' ranks below anything you sourced yourself for the
-    same reason in miniature: it is a real price, but not necessarily one your
-    bookmaker is offering. 'indiarace' ranks below tabnz because it is weaker
-    still: an INDICATIVE forecast price rather than a live board, so it is
-    good for finding races worth a look and poor for deciding a stake."""
+    you could actually have got on. 'manual' is the board or exchange price
+    you typed in yourself; 'api' a book you have configured; 'indiarace' the
+    race-day forecast, which is INDICATIVE rather than a live board and so
+    ranks below anything you sourced yourself -- good for finding races worth
+    a look, poor for deciding a stake; 'sp' the settled starting price, last
+    because it cannot be bet at all. By the time an SP exists the race has
+    run, so treating it as a live quote would invent an opportunity that never
+    existed."""
     rows = conn.execute(
         """SELECT h.name, mo.market, mo.source, mo.decimal_odds
            FROM market_odds mo JOIN horses h ON h.id = mo.horse_id
@@ -591,10 +486,7 @@ def _grade_leg(conn: sqlite3.Connection, leg) -> str:
         "SELECT COUNT(*) n FROM runs WHERE race_id=? AND scratched=0", (leg["race_id"],)
     ).fetchone()["n"]
     from models.odds import places_paid
-    circuit = conn.execute(
-        "SELECT circuit FROM races WHERE id=?", (leg["race_id"],)
-    ).fetchone()
-    n_places = places_paid(field_size, (circuit["circuit"] if circuit else "Australia") or "Australia")
+    n_places = places_paid(field_size)
     if n_places == 0:
         return "lost"
     return "won" if position <= n_places else "lost"
