@@ -754,3 +754,271 @@ def _replay_even(days: dict, n_legs: int, budget: float, unit_cost: float) -> di
             hits += 1
     return {"runners_per_leg": k, "combinations": k ** n_legs,
             "hit_rate": (hits / tried) if tried else 0.0, "days": tried}
+
+
+# --- Did it actually PAY? ---------------------------------------------------
+#
+# backtest_strategy() answers "how often would the ticket have hit". That is
+# the wrong question on its own, and the difference is the whole reason this
+# section exists: a pari-mutuel dividend is the pool divided among everyone
+# holding the same line, so the tickets that hit most often are the ones that
+# pay least. Hit rate and profit can point in opposite directions and on this
+# archive they sometimes do.
+#
+# value_backtest() replays the planner against real archived settlements using
+# the dividend AND the ticket count the club published, so the answer is in
+# money. Two details that would otherwise flatter it:
+#
+#   DILUTION. Adding your own winning ticket to the T that already share the
+#   pool takes the dividend to D x T/(T+1). On a pool won by three tickets that
+#   is a quarter of the prize gone, and ignoring it would overstate exactly the
+#   biggest wins.
+#
+#   THE CONSOLATION TIER. Indian jackpots pay 30% of the pool to tickets one
+#   leg short, so a ticket that misses can still collect -- and a wide ticket
+#   holds many near-misses. Counting the full tier and ignoring this one would
+#   understate a losing day.
+#
+# The unit cancels: a dividend is quoted per winning combination, so a cost
+# counted in combinations and a return counted in dividends are the same unit
+# whatever the club charges for a ticket. That IS an assumption -- worth ten
+# seconds at the tote window to confirm against the club's own card, because if
+# a combination costs twice the unit the dividend is quoted in, every number
+# below is twice as good as reality.
+
+def value_backtest(conn, max_combinations: int = 240, rank_by: str = "sp",
+                   scorer=None) -> dict:
+    """Replay the planner against archived pool settlements, in money.
+
+    rank_by='sp' ranks legs on the starting price and is an UPPER BOUND: those
+    prices do not exist when the ticket has to be submitted. rank_by='model'
+    ranks on information genuinely available beforehand and is the lower bound.
+    The truth sits between them, and which end it sits nearer is exactly what
+    forecast_rank_agreement() is accumulating evidence on.
+
+    scorer: callable(conn, race_id, as_of_date) -> entries, injected rather
+    than imported so this module stays free of the rating engine.
+    """
+    settlements: dict = {}
+    for r in conn.execute(
+            """SELECT race_date, venue, pool, tier, legs, dividend, tickets
+               FROM pool_dividends"""):
+        settlements.setdefault((r["race_date"], r["venue"], r["pool"]), {})[r["tier"]] = r
+
+    results = []
+    for (race_date, venue, pool), tiers in sorted(settlements.items()):
+        any_row = next(iter(tiers.values()))
+        positions = [int(x) for x in (any_row["legs"] or "").split(",") if x.isdigit()]
+        if not positions:
+            continue
+        card = [x["race_number"] for x in conn.execute(
+            "SELECT race_number FROM races WHERE race_date=? AND venue=? ORDER BY race_number",
+            (race_date, venue))]
+        if max(positions) > len(card):
+            continue
+        legs = [_replay_leg(conn, race_date, venue, card[p - 1], rank_by, scorer)
+                for p in positions]
+        if any(leg is None for leg in legs):
+            continue
+
+        outcome = _replay_greedy(legs, max_combinations * 1.0, 1.0)
+        if not outcome:
+            continue
+        widths = outcome["widths"]
+        selected = [set(leg["order"][:w]) for leg, w in zip(legs, widths)]
+        per_leg = [leg["winner"] in sel for leg, sel in zip(legs, selected)]
+
+        # Combinations one leg short: every other leg right, this one wrong.
+        near_miss = 0
+        for i in range(len(legs)):
+            if all(per_leg[j] for j in range(len(legs)) if j != i):
+                near_miss += widths[i] - (1 if per_leg[i] else 0)
+
+        returned = 0.0
+        full = tiers.get("70%") or tiers.get("main")
+        if all(per_leg) and full and full["dividend"]:
+            t = full["tickets"] or 1
+            returned += full["dividend"] * t / (t + 1)
+        cons = tiers.get("30%")
+        if near_miss and cons and cons["dividend"]:
+            t = cons["tickets"] or 1
+            returned += near_miss * cons["dividend"] * t / (t + near_miss)
+
+        results.append({
+            "race_date": race_date, "venue": venue, "pool": pool,
+            "family": pool_family(pool), "legs": len(legs),
+            "combinations": outcome["combinations"], "returned": returned,
+            "hit": all(per_leg), "near_miss": near_miss,
+        })
+
+    if not results:
+        return {"pools": 0}
+    cost = sum(r["combinations"] for r in results)
+    ret = sum(r["returned"] for r in results)
+    rois = sorted((r["returned"] - r["combinations"]) / r["combinations"] for r in results)
+    top3 = sorted(results, key=lambda r: -r["returned"])[:3]
+    cost_ex = cost - sum(r["combinations"] for r in top3)
+    ret_ex = ret - sum(r["returned"] for r in top3)
+    return {
+        "pools": len(results),
+        "hits": sum(1 for r in results if r["hit"]),
+        "cost_units": cost, "returned_units": ret,
+        "roi": (ret - cost) / cost,
+        "median_pool_roi": rois[len(rois) // 2],
+        "roi_excluding_top3": ((ret_ex - cost_ex) / cost_ex) if cost_ex else None,
+        "biggest_pool_share": (max(r["returned"] for r in results) / ret) if ret else 0.0,
+        "ci": _bootstrap_pools(results),
+        "rows": results,
+    }
+
+
+def _replay_leg(conn, race_date: str, venue: str, race_no: int, rank_by: str, scorer):
+    row = conn.execute(
+        "SELECT id FROM races WHERE race_date=? AND venue=? AND race_number=?",
+        (race_date, venue, race_no)).fetchone()
+    if not row:
+        return None
+    runners = conn.execute(
+        """SELECT h.id hid, r.odds_sp, res.finish_position
+           FROM runs r JOIN horses h ON h.id = r.horse_id
+           LEFT JOIN results res ON res.run_id = r.id
+           WHERE r.race_id=? AND r.scratched=0""", (row["id"],)).fetchall()
+    winner = next((x["hid"] for x in runners if x["finish_position"] == 1), None)
+    if winner is None:
+        return None
+    if rank_by == "sp":
+        priced = sorted(((x["hid"], x["odds_sp"]) for x in runners
+                         if x["odds_sp"] and x["odds_sp"] > 0), key=lambda t: t[1])
+        if len(priced) < 4:
+            return None
+        return {"order": [h for h, _ in priced],
+                "probs": _probs_from_sp([sp for _, sp in priced]), "winner": winner}
+    if scorer is None:
+        return None
+    entries = scorer(conn, row["id"], race_date)
+    if len(entries) < 4:
+        return None
+    total = sum(e["win_probability"] for e in entries) or 1.0
+    return {"order": [e["horse_id"] for e in entries],
+            "probs": [e["win_probability"] / total for e in entries], "winner": winner}
+
+
+def _bootstrap_pools(results: list[dict], draws: int = 3000, seed: int = 31):
+    """95% interval on the pooled ROI, resampling whole pools.
+
+    Reported prominently because a pari-mutuel return distribution has a very
+    long right tail: a handful of pools carry most of the winnings, so the mean
+    is a poor summary and the interval around it is wide. Anyone reading a
+    headline ROI here without the interval is reading the tail."""
+    import random
+    rng = random.Random(seed)
+    n = len(results)
+    if n < 8:
+        return None
+    out = []
+    for _ in range(draws):
+        sample = [results[rng.randrange(n)] for _ in range(n)]
+        c = sum(r["combinations"] for r in sample)
+        v = sum(r["returned"] for r in sample)
+        if c:
+            out.append((v - c) / c)
+    if not out:
+        return None
+    out.sort()
+    return out[int(0.025 * len(out))], out[int(0.975 * len(out))]
+
+
+def forecast_rank_agreement(conn) -> dict:
+    """How closely the race-morning forecast ranks runners the way the starting
+    price eventually does.
+
+    THIS IS THE MEASUREMENT THE JACKPOT CASE HANGS ON. Every hit rate this
+    module quotes comes from ranking legs on the starting price, which does not
+    exist when a jackpot ticket has to be submitted. What does exist on race
+    morning is indiarace's forecast, and the whole question is how much is lost
+    by using it instead. If the forecast orders the front of the market the way
+    the starting price does, the measured hit rates carry over. If it does not,
+    they are fiction.
+
+    Reads whatever `--snapshot` has collected. Returns counts alongside every
+    rate, because on a handful of races this says nothing at all and must be
+    read as such."""
+    rows = conn.execute(
+        """SELECT os.race_id, os.horse_id, os.decimal_odds, os.stage
+           FROM odds_snapshots os WHERE os.stage != 'sp'""").fetchall()
+    by_race: dict = {}
+    for r in rows:
+        # Keep the earliest stage quoted for each runner: the earlier the
+        # quote, the more honest the test, since that is when you would be
+        # filling in the ticket.
+        slot = by_race.setdefault(r["race_id"], {})
+        slot.setdefault(r["horse_id"], r["decimal_odds"])
+
+    fav_same = both = top3_overlap = 0
+    fc_cover = sp_cover = graded = 0
+    for race_id, forecast in by_race.items():
+        runners = conn.execute(
+            """SELECT h.id hid, r.odds_sp, res.finish_position
+               FROM runs r JOIN horses h ON h.id = r.horse_id
+               LEFT JOIN results res ON res.run_id = r.id
+               WHERE r.race_id=? AND r.scratched=0""", (race_id,)).fetchall()
+        sp = {x["hid"]: x["odds_sp"] for x in runners if x["odds_sp"] and x["odds_sp"] > 0}
+        winner = next((x["hid"] for x in runners if x["finish_position"] == 1), None)
+        if len(forecast) < 2 or len(sp) < 4:
+            continue
+        both += 1
+        f_order = [h for h, _ in sorted(forecast.items(), key=lambda t: t[1])]
+        s_order = [h for h, _ in sorted(sp.items(), key=lambda t: t[1])]
+        if f_order[0] == s_order[0]:
+            fav_same += 1
+        top3_overlap += len(set(f_order[:3]) & set(s_order[:3]))
+        if winner is not None:
+            graded += 1
+            fc_cover += 1 if winner in f_order[:3] else 0
+            sp_cover += 1 if winner in s_order[:3] else 0
+
+    if not both:
+        return {"races": 0}
+    return {
+        "races": both,
+        "same_favourite": fav_same,
+        "same_favourite_rate": fav_same / both,
+        "mean_top3_overlap": top3_overlap / both,
+        "graded": graded,
+        "forecast_top3_covers": (fc_cover / graded) if graded else None,
+        "sp_top3_covers": (sp_cover / graded) if graded else None,
+        "verdict": (
+            f"{both} races with both a forecast and a starting price. Under 30 this settles "
+            f"nothing -- run `python -m scripts.daily --snapshot` on race-day mornings and "
+            f"again after the results to keep it filling."
+            if both < 30 else
+            f"{both} races. The forecast names the same favourite {fav_same / both * 100:.0f}% "
+            f"of the time and shares {top3_overlap / both:.1f} of its top three with the "
+            f"starting price. That is the discount to apply to every jackpot hit rate in this "
+            f"tab."
+        ),
+    }
+
+
+def carryover_watch(conn, venue: str | None = None, limit: int = 6) -> list[dict]:
+    """Pools that nobody hit, whose money rolls into the next meeting's pool.
+
+    The one place in pari-mutuel betting where money appears that nobody bet
+    for. A carry-forward is added to the next pool without anyone paying
+    takeout on it, so it lowers the effective takeout of the NEXT running of
+    that pool by exactly its share of it. It does not make the bet good by
+    itself -- you would need the carried amount to exceed the takeout on the
+    new money, and clubs do not publish pool sizes -- but it is the only
+    tailwind on offer and it is worth knowing about before deciding what to
+    spend on a ticket."""
+    q = ("SELECT race_date, venue, pool, carried_forward FROM pool_dividends "
+         "WHERE carried_forward IS NOT NULL")
+    params: tuple = ()
+    if venue:
+        q += " AND venue=?"
+        params = (venue,)
+    q += " ORDER BY race_date DESC LIMIT ?"
+    return [{"race_date": r["race_date"], "venue": r["venue"],
+             "pool": r["pool"].title(), "family": pool_family(r["pool"]),
+             "amount": r["carried_forward"]}
+            for r in conn.execute(q, params + (limit,))]

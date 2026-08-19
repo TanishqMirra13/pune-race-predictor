@@ -192,6 +192,36 @@ CREATE TABLE IF NOT EXISTS pool_dividends (
     UNIQUE(race_date, venue, pool, tier)
 );
 
+-- Bets placed under the measured price-band rule in models/edge.py, kept apart
+-- from bankroll_log because they answer a different question. bankroll_log is a
+-- diary of what you staked; this is an experiment with a hypothesis attached.
+--
+-- The hypothesis: a ring price under 2.00 returned +11.5% over 163 archived
+-- bets, with a 95% interval of [-0.8%, +23.6%] -- an interval that touches
+-- zero, so the edge may not exist. Nothing but a run of real bets at real
+-- prices will settle that, and settling it needs the PRICE TAKEN and the BAND
+-- stored per bet, not just a running total. Grading a bet later at a different
+-- number would measure a bet nobody placed.
+--
+-- 'market' records ring or tote, because the same selection is worth about 8
+-- points more in one than the other and a record that blurs them is worthless.
+CREATE TABLE IF NOT EXISTS edge_bets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    race_date TEXT NOT NULL,
+    venue TEXT NOT NULL,
+    race_no INTEGER,
+    horse_name TEXT NOT NULL,
+    market TEXT NOT NULL CHECK(market IN ('ring', 'tote')),
+    price REAL NOT NULL,
+    stake REAL NOT NULL,
+    band TEXT,
+    verdict TEXT,
+    outcome TEXT,
+    payout REAL,
+    notes TEXT,
+    placed_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
 -- A suggested (and possibly placed) multi/parlay. Stored whole so the daily
 -- followup can settle it leg by leg and the calibration view can compare the
 -- hit rate we predicted against the hit rate we got.
@@ -342,6 +372,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_odds_snapshots_race ON odds_snapshots(race_id, stage)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_pool_dividends_meeting "
                  "ON pool_dividends(race_date, venue)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_edge_bets_date ON edge_bets(race_date)")
 
 
 if __name__ == "__main__":

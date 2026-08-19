@@ -12,6 +12,75 @@ removed. They were a distraction from the only circuit whose data this project
 can actually get at reliably, and covering three jurisdictions badly is worse
 than covering one properly.
 
+## The edge, such as it is
+
+Everything below this heading is measured from the archive, and the app
+recomputes all of it live rather than quoting these numbers from a constant.
+
+### There are two markets on every race, and one is 8 points cheaper
+
+The result pages carry two independent prices for the same horse. `odds_sp` is
+the **on-course bookmaker ring's** starting price; `dividend_win` is the
+**tote's** pari-mutuel payout. They are not a transform of one another -- the
+tote pays more on 10-22% of winners, and the ratio ranges from 0.37 to over 1.
+
+Backing every runner in every archived race, 4,302 bets across 488 races:
+
+| Market | Return |
+|---|---:|
+| On-course bookmaker ring | **-38.4%** |
+| Tote | **-46.3%** |
+
+**The tote costs an extra 7.9 points of every rupee staked**, on every bet,
+before anyone has an opinion about a horse. That is larger than every
+handicapping signal in this project combined, it needs no model, and the sample
+is past arguing about. Where a bet can go in either market, it goes in the ring.
+Jackpots are tote-only by necessity -- Indian clubs run no other pool for them.
+
+### Inside the ring, price is the only thing that has predicted return
+
+| Ring SP | Bets | Won | Price implies | Return |
+|---|---:|---:|---:|---:|
+| 1.00-2.00 | 167 | **67.1%** | 60.3% | **+11.7%** |
+| 2.00-3.00 | 218 | 41.7% | 41.3% | +1.1% |
+| 3.00-4.50 | 290 | 29.0% | 28.5% | +1.1% |
+| 4.50-7.00 | 488 | 15.4% | 18.4% | -16.1% |
+| 7.00-11.0 | 584 | 10.1% | 12.1% | -16.4% |
+| 11.0-21.0 | 1,295 | 3.9% | 7.4% | -47.6% |
+| 21.0+ | 1,260 | 1.3% | 4.5% | -70.5% |
+
+Favourite-longshot bias, unusually severe. The two longest bands are 2,555 of
+the 4,302 bets and account for essentially all of the damage: **not betting
+those is worth more than any selection method in this app.**
+
+**The paying band is not statistically significant.** +11.7% carries a 95%
+interval of [-0.8%, +23.6%] on 167 bets -- it touches zero. What stops it being
+dismissed is that it comes out at +11.8% in the first half of the archive by
+date and +11.5% in the second, that it is positive at five of six venues, and
+that favourite-longshot bias is the most replicated inefficiency in racing and
+is strongest where takeout is heavy and money is unsophisticated. Treat it as a
+hypothesis worth small stakes and a long record, not a proven edge.
+
+The **Edge** tab is the whole of this: the band table, a price checker that
+gives BET / THIN / SKIP off the ring board, and a bet log that settles against
+real results so the hypothesis gets confirmed or killed. It refuses a verdict
+under 50 settled bets, which at roughly two qualifying bets a race day is a
+season.
+
+Two things deliberately absent. There is **no measured edge for place bets**,
+because there is no data -- not one place dividend exists in the archive, so no
+place return has ever been computed at any price. And the filter "only back the
+ring favourite when the tote disagrees" is **not** implemented: it looked strong
+on one cut (-20.7%) and like nothing on another (-3.6%) on ~66 races. A filter
+whose sign moves when you look at it differently is not a filter.
+
+### What this cannot do
+
+It cannot produce a daily income. The paying band fires about twice a race day.
+At +11% on Rs500 stakes that is roughly Rs110 expected per race day with swings
+far larger than that, and the true edge may be zero. Anyone reading the table
+above as a salary has misread it.
+
 ## Indian racing is not one circuit
 
 It is six active clubs under four regional turf authorities, and the grouping is
@@ -129,6 +198,36 @@ read the direction rather than the decimals.
   what that costs, and the dividend that would have to clear for it to be worth
   adding.
 
+### Did it actually pay?
+
+Hit rate is the wrong question on its own. Replaying the planner at 240
+combinations against every archived pool settlement -- using the dividend and
+the ticket count the club published, with your own ticket diluting the pool and
+the 30% consolation tier counted:
+
+| Legs ranked by | Pooled return | 95% interval | Median pool | Excl. best 3 |
+|---|---:|---:|---:|---:|
+| Starting price (upper bound) | **+236%** | +63% to +466% | -42% | +90% |
+| The model (lower bound) | +130% | -18% to +332% | -100% | -11% |
+
+Read the median next to the mean. **Most tickets lose** -- the median pool
+returned -42% -- and the profit lives in a long tail, with the single best pool
+supplying 27% of all winnings. That is the shape of a pari-mutuel return, and it
+means a positive average needs a bankroll that survives the losing weeks to ever
+be collected. The sample is 39 settlements from a handful of race days at two
+venues; it is not a random sample of Indian racing.
+
+One assumption worth ten seconds at the tote window: the units cancel only if a
+dividend is quoted per one combination. If a combination costs twice what the
+dividend is quoted per, every figure above is twice as good as reality.
+
+**Carry-forwards are the one genuine tailwind.** Three of 39 settlements carried
+(Rs33k, Rs33k, Rs48k) -- money added to the next pool that nobody paid takeout
+on, which lowers the effective takeout of that running by its share of the pool.
+Every carry-forward is now recorded and the planner flags the venue's most
+recent one. It does not make the bet good on its own, but a pool that has just
+carried is the one to prefer.
+
 ### The honest limit
 
 A jackpot ticket must be submitted before the first leg runs, and a starting
@@ -218,7 +317,9 @@ venv\Scripts\activate
 streamlit run app.py
 ```
 
-Opens at http://localhost:8501. Pick a venue in the sidebar — the picker is
+Opens at http://localhost:8501. The **Edge** tab comes first because it is the
+only screen built on a measured return rather than a model opinion, and it is
+the one to have open in front of a bookmaker's board. Pick a venue in the sidebar — the picker is
 grouped by vertical and marks the meetings already loaded for that date — then
 **Fetch live**. Off-season or if the site is unreachable, use **Manual paste
 fallback** with the saved HTML source.

@@ -19,6 +19,7 @@ from models.betslip import (
     DEFAULT_MIN_EDGE_AT_PLACEMENT, build_slip, validate_against_live,
 )
 from models.odds import margin_percent, overround
+from models import edge
 from models import jackpot as jackpot_engine
 from models import raceday
 from models import verticals
@@ -314,16 +315,234 @@ STALE_ODDS_MINUTES = 90
 race_plans = get_race_plans(date_str, venue) if venue else []
 slate = get_slate(date_str)
 
-# Tab order is deliberate: "Race Day" is the phone-at-the-track view and comes
-# first. Everything after it is homework you do at home on a laptop (backtest,
-# calibration, connections, the vertical profiles) -- it should not compete for
-# thumb space.
-(tab_raceday, tab_today, tab_parlay, tab_jackpot, tab_odds, tab_followup, tab_place,
- tab_forecast, tab_verticals, tab_connections, tab_backtest, tab_bankroll) = st.tabs(
-    ["Race Day", "Today's Picks", "Daily Parlays", "Jackpot Planner", "Odds", "Followup",
-     "Place Bets", "Forecast / Quinella", "Verticals", "Connections", "Backtest",
-     "Bankroll & Calibration"]
+# Tab order is deliberate. "Edge" comes first because it is the only screen in
+# the app built on a measured return rather than on a model opinion, and it is
+# the one you open standing in front of a bookmaker's board. "Race Day" is the
+# rest of the phone-at-the-track view. Everything after those is homework you do
+# at home on a laptop (backtest, calibration, connections, the vertical
+# profiles) -- it should not compete for thumb space.
+(tab_edge, tab_raceday, tab_today, tab_parlay, tab_jackpot, tab_odds, tab_followup,
+ tab_place, tab_forecast, tab_verticals, tab_connections, tab_backtest,
+ tab_bankroll) = st.tabs(
+    ["Edge", "Race Day", "Today's Picks", "Daily Parlays", "Jackpot Planner", "Odds",
+     "Followup", "Place Bets", "Forecast / Quinella", "Verticals", "Connections",
+     "Backtest", "Bankroll & Calibration"]
 )
+
+with tab_edge:
+    st.subheader("Where the edge is")
+
+    # Measured live from the archive rather than quoted from a constant, so a
+    # number on this screen can never outlive the data that produced it.
+    _gap = edge.market_gap(conn)
+    _bands = edge.measure_bands(conn)
+
+    if not _gap.get("races"):
+        st.info("No archived races with both a ring price and a tote dividend yet.")
+    else:
+        st.markdown(
+            f"**Two markets run on every Indian race, and one of them is "
+            f"{_gap['gap_pp'] * 100:.1f} points cheaper.** The on-course bookmaker ring and the "
+            f"tote price the same horses independently. Backing every runner in "
+            f"{_gap['races']} archived races — {_gap['bets']:,} bets — returned "
+            f"**{_gap['ring_roi'] * 100:.1f}%** in the ring and **{_gap['tote_roi'] * 100:.1f}%** "
+            f"on the tote. That gap costs you on every bet you place, needs no model, and is the "
+            f"only number in this project with a sample past arguing about."
+        )
+        st.success(
+            "**Your win and place bets already go through the ring, which is the right side of "
+            "that.** Keep them there. Your jackpots have to go through the tote — Indian clubs "
+            "run no other pool for them — so that one is forced, not a choice."
+        )
+
+        st.markdown(ui.section_label("What each price band actually returned"), unsafe_allow_html=True)
+        st.dataframe(
+            [{"Ring price": f"{b['lo']:.2f} – {b['hi']:.2f}" if b["hi"] < 900 else f"{b['lo']:.2f}+",
+              "Bets": b["bets"],
+              "Won": f"{b['win_rate'] * 100:.1f}%",
+              "Price implies": f"{b['implied'] * 100:.1f}%",
+              "Return": f"{b['roi'] * 100:+.1f}%",
+              "95% interval": (f"{b['ci_low'] * 100:+.0f}% to {b['ci_high'] * 100:+.0f}%"
+                               if "ci_low" in b else "too few bets")}
+             for b in _bands],
+            use_container_width=True, hide_index=True,
+        )
+        st.caption(
+            "Favourite–longshot bias, and unusually severe. Short prices win more often than "
+            "their price implies; long ones win far less. Note where the money is lost: the two "
+            "longest bands are 2,555 of the 4,302 bets and account for essentially all of the "
+            "damage. **Not betting those is worth more than any selection method in this app.**"
+        )
+        _edge_band = next((b for b in _bands
+                           if (b["lo"], b["hi"]) == edge.EDGE_BAND), None)
+        if _edge_band and "ci_low" in _edge_band:
+            st.warning(
+                f"**Read the interval before sizing anything.** The one paying band is "
+                f"{_edge_band['roi'] * 100:+.1f}% over {_edge_band['bets']} bets, but its 95% "
+                f"interval runs {_edge_band['ci_low'] * 100:+.0f}% to "
+                f"{_edge_band['ci_high'] * 100:+.0f}% — it touches zero, so this may be nothing. "
+                f"What keeps it alive is that it comes out about the same in both halves of the "
+                f"archive by date and is positive at five of six venues, and that "
+                f"favourite–longshot bias is the most replicated inefficiency in racing. Treat it "
+                f"as a hypothesis you are staking small money on, and log every bet below so it "
+                f"gets settled by evidence."
+            )
+
+        _fa = edge.favourite_agreement(conn)
+        if _fa.get("races"):
+            with st.expander("Does it matter when the ring and the tote disagree on the favourite?"):
+                st.caption(
+                    f"They name the same favourite in {_fa['agreement_rate'] * 100:.0f}% of "
+                    f"{_fa['races']} races. Backing the ring favourite:"
+                )
+                st.dataframe(
+                    [{"Case": "Both markets agree", "Races": _fa["agree"]["n"],
+                      "Won": f"{_fa['agree']['win_rate'] * 100:.1f}%",
+                      "Return in ring": f"{_fa['agree']['ring_roi'] * 100:+.1f}%"}]
+                    + ([{"Case": "They disagree", "Races": _fa["disagree"]["n"],
+                         "Won": f"{_fa['disagree']['win_rate'] * 100:.1f}%",
+                         "Return in ring": f"{_fa['disagree']['ring_roi'] * 100:+.1f}%"}]
+                       if _fa["disagree"] else []),
+                    use_container_width=True, hide_index=True,
+                )
+                st.caption(
+                    "**This is reported, not enforced.** Disagreement looked like a strong "
+                    "negative signal on one cut of the data and almost nothing on another, on a "
+                    "sample of about 66 races. A filter whose sign moves when you look at it "
+                    "differently is not a filter. Worth a second look at the horse; not worth a "
+                    "rule."
+                )
+
+        # ------------------------------------------------------------------
+        st.divider()
+        st.markdown(ui.section_label("Check a price at the board"), unsafe_allow_html=True)
+
+        if not race_plans:
+            st.info("Load a race card in the sidebar and this will pre-fill the field for you.")
+        else:
+            ec1, ec2 = st.columns([1, 2])
+            e_race = ec1.selectbox("Race", [rp["race_no"] for rp in race_plans],
+                                   format_func=lambda n: f"R{n}", key="edge_race")
+            _rp = next(r for r in race_plans if r["race_no"] == e_race)
+            _names = [e["horse_name"] for e in _rp["entries"]] or ["(no runners parsed)"]
+            e_horse = ec2.selectbox("Runner", _names, key="edge_horse")
+
+            p1, p2, p3 = st.columns([1, 1, 1])
+            e_price = p1.number_input(
+                "Price in the ring (decimal)", min_value=0.0, value=0.0, step=0.05,
+                key="edge_price",
+                help="Decimal, so 5/2 is 3.50 and evens is 2.00. Take it off the ring board, "
+                     "not the tote screen.")
+            e_isfav = p2.checkbox("Shortest price in the ring", value=True, key="edge_isfav")
+            e_agree = p3.checkbox("Tote board agrees it's favourite", value=True, key="edge_agree")
+
+            _v = edge.qualify(e_price or None, _bands,
+                              is_ring_favourite=e_isfav, tote_agrees=e_agree)
+            if _v["verdict"] == "BET":
+                st.success(f"**BET** — {_v['reason']}")
+            elif _v["verdict"] == "THIN":
+                st.warning(f"**THIN** — {_v['reason']}")
+            elif _v["verdict"] == "SKIP":
+                st.error(f"**SKIP** — {_v['reason']}")
+            else:
+                st.info(_v["reason"])
+            for _n in _v.get("notes", []):
+                st.caption(f"· {_n}")
+
+            if _v["verdict"] in ("BET", "THIN"):
+                _model = next((e for e in _rp["entries"] if e["horse_name"] == e_horse), None)
+                if _model:
+                    st.caption(
+                        f"For context only: the model makes {e_horse} a "
+                        f"{_model['win_probability'] * 100:.0f}% chance, ranked "
+                        f"{_rp['entries'].index(_model) + 1} of {len(_rp['entries'])}. **The "
+                        f"verdict above ignores that on purpose** — the model's own pick has "
+                        f"never beaten the market in this archive, while the price band has a "
+                        f"measurable relationship with return."
+                    )
+                s1, s2 = st.columns([1, 2])
+                e_stake = s1.number_input("Stake (Rs)", min_value=0.0, value=200.0, step=50.0,
+                                          key="edge_stake")
+                s2.caption(
+                    "Keep it small and keep it the same size every time. A varying stake on an "
+                    "unproven edge makes the record unreadable: you cannot tell a real return "
+                    "from having happened to bet more on the winners."
+                )
+                if st.button("Log this bet", use_container_width=True, key="edge_log"):
+                    _band = _v["band"]
+                    edge.log_bet(
+                        conn, date_str, venue, e_race, e_horse, "ring", e_price, e_stake,
+                        band=f"{_band['lo']:.2f}-{_band['hi']:.2f}" if _band else "?",
+                        verdict=_v["verdict"],
+                        notes=("ring fav" if e_isfav else "not ring fav")
+                              + ("; tote agrees" if e_agree else "; tote disagrees"))
+                    st.success("Logged. Settle it below once the results are in.")
+                    st.rerun()
+
+        # ------------------------------------------------------------------
+        st.divider()
+        st.markdown(ui.section_label("The record — is any of this real?"), unsafe_allow_html=True)
+
+        lc1, lc2 = st.columns([1, 2])
+        if lc1.button("Settle this date", use_container_width=True, key="edge_settle"):
+            _res = edge.settle_from_results(conn, date_str)
+            if _res["settled"]:
+                st.success(f"Settled {_res['settled']} bet(s), {_res['won']} won.")
+                st.rerun()
+            else:
+                st.info(f"Nothing to settle — {_res['pending']} bet(s) still waiting on results. "
+                        f"Load them from the sidebar first.")
+        lc2.caption("Grades each logged bet against the stored finishing position and pays it at "
+                    "the price you actually took, which is the whole reason the price is stored.")
+
+        _today = conn.execute(
+            "SELECT * FROM edge_bets WHERE race_date=? ORDER BY id DESC", (date_str,)).fetchall()
+        if _today:
+            st.dataframe(
+                [{"Race": f"R{b['race_no']}", "Runner": b["horse_name"],
+                  "Price": f"{b['price']:.2f}", "Stake": f"Rs{b['stake']:.0f}",
+                  "Band": b["band"], "Called": b["verdict"],
+                  "Result": b["outcome"] or "pending",
+                  "Returned": f"Rs{b['payout']:.0f}" if b["payout"] is not None else "—"}
+                 for b in _today],
+                use_container_width=True, hide_index=True,
+            )
+
+        _perf = edge.performance(conn)
+        if _perf["n"]:
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Settled bets", _perf["n"])
+            m2.metric("Won", f"{_perf['won']} ({_perf['won'] / _perf['n'] * 100:.0f}%)")
+            m3.metric("Return", f"{_perf['roi'] * 100:+.1f}%",
+                      delta=f"Rs{_perf['returned'] - _perf['staked']:+,.0f}")
+            st.caption(_perf["verdict"])
+            if len(_perf["by_band"]) > 1:
+                st.dataframe(
+                    [{"Band": k, "Bets": v["n"], "Won": v["won"],
+                      "Staked": f"Rs{v['staked']:.0f}",
+                      "Return": f"{((v['ret'] - v['staked']) / v['staked'] * 100):+.1f}%"
+                      if v["staked"] else "—"}
+                     for k, v in sorted(_perf["by_band"].items())],
+                    use_container_width=True, hide_index=True,
+                )
+        else:
+            st.caption(
+                f"Nothing settled yet. It takes about {edge.MIN_LOGGED_FOR_VERDICT} bets before "
+                f"this record says anything — at roughly two qualifying bets a race day that is "
+                f"a season, which is the honest timescale for finding out whether the band edge "
+                f"is real."
+            )
+
+        st.divider()
+        st.caption(
+            "**What is deliberately not here.** There is no measured edge for place bets, because "
+            "there is no data: not one place dividend exists in the archive, so no place return "
+            "has ever been computed at any price. The Place Bets tab stays a model shortlist to "
+            "price up by hand. And nothing here says a jackpot is a good bet — see the Jackpot "
+            "Planner, which maximises the chance of hitting and then tells you what dividend that "
+            "would need to be worth doing."
+        )
+
 
 with tab_raceday:
     if not race_plans:
@@ -982,6 +1201,137 @@ with tab_jackpot:
                                 "races of 7 — encouraging, and nowhere near enough to conclude "
                                 "anything."
                             )
+
+
+    # ----------------------------------------------------------------------
+    # The three things that decide whether a jackpot is worth playing at all,
+    # kept outside the planner because they are true of the pool rather than
+    # of any one ticket.
+    # ----------------------------------------------------------------------
+    st.divider()
+    st.markdown(ui.section_label("Is this pool worth playing this week?"),
+                unsafe_allow_html=True)
+
+    _carry = jackpot_engine.carryover_watch(conn, venue=venue)
+    if _carry:
+        _latest = _carry[0]
+        st.info(
+            f"💰 **Carry-forward on record: Rs{_latest['amount']:,.0f}** in {venue}'s "
+            f"{_latest['pool']} on {_latest['race_date']} — nobody hit it and the money rolled "
+            f"into the next running of that pool. This is the one place in pari-mutuel betting "
+            f"where money appears that nobody bet for: it is added to the pool without paying "
+            f"takeout, so it lowers the effective takeout of the next running by its share of "
+            f"it. It does not make the bet good on its own — you would need the carried amount "
+            f"to outweigh the takeout on all the new money, and clubs do not publish pool "
+            f"sizes — but it is the only tailwind on offer, and a pool that has just carried is "
+            f"the one to prefer."
+        )
+        if len(_carry) > 1:
+            st.caption("Also carried recently: " + "; ".join(
+                f"{r['race_date']} {r['venue']} {r['pool']} Rs{r['amount']:,.0f}"
+                for r in _carry[1:4]))
+    else:
+        st.caption(
+            f"No carry-forward recorded for {venue} yet. Load more result pages and any pool "
+            f"nobody hit gets logged here — those are the weeks worth playing."
+        )
+
+    _agree = jackpot_engine.forecast_rank_agreement(conn)
+    with st.expander("⚠️ The measurement everything in this tab is waiting on", expanded=False):
+        st.markdown(
+            "**Every hit rate on this page ranks legs by the starting price, and a starting "
+            "price does not exist when a jackpot ticket has to be handed over.** The ticket goes "
+            "in before the first leg runs; the prices form during betting on each race. So those "
+            "numbers measure how good the method is when its input is good, and are an upper "
+            "bound on what it does off the race-morning forecast, which is what you would "
+            "actually have."
+        )
+        if not _agree.get("races"):
+            st.caption(
+                "Nothing collected yet. `python -m scripts.daily --snapshot` on a race-day "
+                "morning records the forecast; run it again after the results and it settles "
+                "the starting prices alongside. A few weeks of that answers the question."
+            )
+        else:
+            a1, a2, a3 = st.columns(3)
+            a1.metric("Races with both", _agree["races"])
+            a2.metric("Same favourite", f"{_agree['same_favourite_rate'] * 100:.0f}%")
+            a3.metric("Shared top 3", f"{_agree['mean_top3_overlap']:.1f} of 3")
+            if _agree.get("forecast_top3_covers") is not None:
+                st.caption(
+                    f"Winner came from the forecast's top three "
+                    f"{_agree['forecast_top3_covers'] * 100:.0f}% of the time, against "
+                    f"{_agree['sp_top3_covers'] * 100:.0f}% for the starting price, over "
+                    f"{_agree['graded']} graded races."
+                )
+            st.caption(_agree["verdict"])
+
+    with st.expander("💵 Did it actually pay? Replayed against real dividends"):
+        st.caption(
+            "Hit rate is the wrong question on its own. A jackpot is pari-mutuel, so the tickets "
+            "that hit most often are the ones sharing the pool with the most people. This "
+            "replays the planner against every archived settlement using the dividend AND the "
+            "ticket count the club published, with your own ticket diluting the pool and the "
+            "30% consolation tier counted when the ticket finishes one leg short."
+        )
+        vb_c1, vb_c2 = st.columns([1, 1])
+        vb_budget = vb_c1.number_input("Combinations per ticket", min_value=8, max_value=2000,
+                                       value=240, step=8, key="vb_combos")
+        vb_model = vb_c2.checkbox(
+            "Also replay with model-ranked legs (slow)", value=False, key="vb_model",
+            help="Legs ranked on information genuinely available before the first race. This "
+                 "is the lower bound; the starting-price row is the upper bound.")
+        if st.button("Run the money replay", use_container_width=True, key="vb_run"):
+            with st.spinner("Replaying archived pool settlements..."):
+                out = {"sp": jackpot_engine.value_backtest(
+                    conn, max_combinations=int(vb_budget), rank_by="sp")}
+                if vb_model:
+                    out["model"] = jackpot_engine.value_backtest(
+                        conn, max_combinations=int(vb_budget), rank_by="model",
+                        scorer=lambda cn, rid, d: compute_composite_scores(cn, rid, as_of_date=d))
+                st.session_state["vb"] = out
+
+        _vb = st.session_state.get("vb")
+        if _vb:
+            rows = []
+            for key, label in (("sp", "Legs ranked by starting price (upper bound)"),
+                               ("model", "Legs ranked by the model (lower bound)")):
+                r = _vb.get(key)
+                if not r or not r.get("pools"):
+                    continue
+                ci = r.get("ci")
+                rows.append({
+                    "Method": label, "Pools": r["pools"], "Hit": r["hits"],
+                    "Return": f"{r['roi'] * 100:+.0f}%",
+                    "95% interval": (f"{ci[0] * 100:+.0f}% to {ci[1] * 100:+.0f}%"
+                                     if ci else "—"),
+                    "Median pool": f"{r['median_pool_roi'] * 100:+.0f}%",
+                    "Excl. best 3": (f"{r['roi_excluding_top3'] * 100:+.0f}%"
+                                     if r.get("roi_excluding_top3") is not None else "—"),
+                })
+            if rows:
+                st.dataframe(rows, use_container_width=True, hide_index=True)
+                _sp = _vb.get("sp") or {}
+                st.caption(
+                    f"**Read the median next to the mean.** Most tickets lose — the median pool "
+                    f"returned {_sp.get('median_pool_roi', 0) * 100:+.0f}% — and the profit lives "
+                    f"in a long tail, with the single best pool supplying "
+                    f"{_sp.get('biggest_pool_share', 0) * 100:.0f}% of all winnings. That is the "
+                    f"shape of a pari-mutuel return, and it means a positive average needs a "
+                    f"bankroll that survives the losing weeks to ever be collected."
+                )
+                st.caption(
+                    f"Sample: {_sp.get('pools', 0)} settlements from the meetings whose results "
+                    f"have been archived — a handful of race days at two venues. Not a random "
+                    f"sample of Indian racing, and nothing here is established until the "
+                    f"forecast-rank question above is answered."
+                )
+                st.caption(
+                    "**One assumption worth ten seconds at the tote window:** the units cancel "
+                    "only if a dividend is quoted per one combination. If a combination costs "
+                    "twice what the dividend is quoted per, every figure above is twice as good "
+                    "as reality. Check the club's own card."
+                )
 
 
 with tab_verticals:

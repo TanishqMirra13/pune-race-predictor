@@ -42,8 +42,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from db.ingest import (  # noqa: E402
-    load_market_odds, odds_age_minutes, settle_parlays, store_market_odds,
-    store_pool_dividends, store_racecard, store_raceresult,
+    load_market_odds, odds_age_minutes, settle_parlays, snapshot_odds,
+    snapshot_settle_sp, store_market_odds, store_pool_dividends, store_racecard,
+    store_raceresult,
 )
 from db.schema import get_connection, init_db  # noqa: E402
 from models import jackpot as jackpot_engine  # noqa: E402
@@ -139,8 +140,15 @@ def load_forecast_odds(conn, date_str: str, venues: list[str]) -> int:
                                 indiarace.to_market_rows(odds_map, field_by_race),
                                 source="indiarace")
         total += res["matched"]
+        # Snapshot from the SAME fetch rather than re-requesting the page. The
+        # snapshot archive is the only thing that will ever answer whether a
+        # race-morning forecast ranks a field the way the starting price does,
+        # which is the question every jackpot number in this project is waiting
+        # on -- so it should accrue from an ordinary morning run, not only when
+        # somebody remembers to type --snapshot.
+        snap = snapshot_odds(conn, date_str, venue, odds_map, field_by_race)
         print(f"    {venue:<12} {res['matched']:>3} runners priced "
-              f"({len(odds_map)} on the page)")
+              f"({len(odds_map)} on the page), {snap['stages_written']} stage quotes archived")
     if total:
         print("  These are forecast prices, not the board. Confirm the number where you")
         print("  actually bet before staking anything.")
@@ -364,7 +372,11 @@ def do_results(conn, date_str: str, venues: list[str]) -> None:
             pools += store_pool_dividends(conn, date_str, venue, found)
         print(f"    {venue:<12} {n:>3} runners across {len(races)} races"
               + (f", {len(found)} pool settlements" if found else ""))
-    print(f"  Stored {total} result rows (starting prices included) and {pools} pool dividends.")
+    # Copy the settled starting prices into the snapshot archive so each
+    # morning's forecast finally has the number it is being judged against.
+    settled = snapshot_settle_sp(conn, date_str)
+    print(f"  Stored {total} result rows (starting prices included), {pools} pool dividends, "
+          f"and settled {settled} snapshot SPs.")
 
 
 def do_snapshot(conn, date_str: str) -> None:
@@ -378,8 +390,6 @@ def do_snapshot(conn, date_str: str) -> None:
 
     Safe to run repeatedly: stages upsert, so a later run just refreshes.
     """
-    from db.ingest import snapshot_odds, snapshot_settle_sp
-
     venues = [r["venue"] for r in conn.execute(
         "SELECT DISTINCT venue FROM races WHERE race_date=? AND circuit='India' ORDER BY venue",
         (date_str,)).fetchall()]
