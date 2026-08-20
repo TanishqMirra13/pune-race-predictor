@@ -6,29 +6,68 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from db.schema import get_connection, init_db
-from db.ingest import (
-    load_market_odds, odds_age_minutes, save_parlay, settle_parlays,
-    store_market_odds, store_pool_dividends, store_racecard, store_raceresult,
-)
-from scrapers import rwitc, btc, odds_import
-from scrapers import indiarace_cards
-from models.rating_engine import compute_composite_scores
-from models import parlay as parlay_engine
-from models.betslip import (
-    DEFAULT_MIN_EDGE_AT_PLACEMENT, build_slip, validate_against_live,
-)
-from models.odds import margin_percent, overround
-from models import edge
-from models import jackpot as jackpot_engine
-from models import raceday
-from models import verticals
-from models.staking import (
-    build_win_place_plan, harville_forecast_probabilities, stop_rules,
-    build_place_shortlist,
-)
-from ui.theme import inject_theme
-from ui import components as ui
+# WHY THESE IMPORTS ARE GUARDED
+#
+# Streamlit Cloud has twice now carried an already-imported module of ours in
+# memory across a redeploy, leaving app.py on the new commit while the module
+# it imports from is the old one. The first time (Aug 2026, ui.components) it
+# was an optional display badge and the fix was to resolve it with getattr and
+# render without it. That approach does not extend to this: a stale db.ingest
+# is missing store_pool_dividends, and a stale container has never heard of
+# models/edge.py, models/jackpot.py or models/verticals.py at all. Those are
+# load-bearing -- there is no degraded page worth showing without them.
+#
+# What CAN be fixed is the diagnosis. Streamlit redacts the exception text on a
+# deployed app, so this failure presents as a bare "ImportError" with a
+# traceback pointing at an import line that is provably correct in the deployed
+# commit -- which sends you looking for a bug in code that does not have one.
+# Catching it and naming the actual cause turns that into one click.
+#
+# A local run never takes this path: the names either exist or the code really
+# is broken, and the second branch says which.
+try:
+    from db.schema import get_connection, init_db
+    from db.ingest import (
+        load_market_odds, odds_age_minutes, save_parlay, settle_parlays,
+        store_market_odds, store_pool_dividends, store_racecard, store_raceresult,
+    )
+    from scrapers import rwitc, btc, odds_import
+    from scrapers import indiarace_cards
+    from models.rating_engine import compute_composite_scores
+    from models import parlay as parlay_engine
+    from models.betslip import (
+        DEFAULT_MIN_EDGE_AT_PLACEMENT, build_slip, validate_against_live,
+    )
+    from models.odds import margin_percent, overround
+    from models import edge
+    from models import jackpot as jackpot_engine
+    from models import raceday
+    from models import verticals
+    from models.staking import (
+        build_win_place_plan, harville_forecast_probabilities, stop_rules,
+        build_place_shortlist,
+    )
+    from ui.theme import inject_theme
+    from ui import components as ui
+except ImportError as _import_error:
+    _stale = [name for name in ("db.ingest", "models.edge", "models.jackpot",
+                                "models.verticals", "ui.components")
+              if name in sys.modules]
+    st.error(
+        f"""**This deploy is running new app code against an old copy of its own modules.**
+
+`{_import_error}`
+
+The source in this commit is consistent — the name above does exist in the file the
+traceback blames. Streamlit Cloud is holding a module from the previous deploy in
+memory, which has happened to this app before.
+
+**Fix: open _Manage app_ (lower right) and choose _Reboot app_.** That starts a clean
+process and it comes back. Nothing needs changing in the repository."""
+    )
+    if _stale:
+        st.caption("Modules already resident from an earlier deploy: " + ", ".join(_stale))
+    st.stop()
 
 # layout="centered" (not "wide"): the primary use is a phone at the track, and
 # "wide" forces a desktop-width grid that squeezes content into a column on
