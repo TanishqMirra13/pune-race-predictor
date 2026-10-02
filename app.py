@@ -1,10 +1,44 @@
+import os
 import sys
 from datetime import date, timedelta
 from pathlib import Path
 
 import streamlit as st
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+_APP_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(_APP_DIR))
+
+# DROP OUR OWN MODULES WHEN THEIR SOURCE HAS CHANGED UNDERNEATH THEM
+#
+# Streamlit Cloud re-executes this file on a redeploy but keeps whatever it had
+# already imported, so app.py runs on the new commit against modules from the
+# old one. Three times now that has taken the app down. The guard further down
+# can only name the problem, and only when it surfaces as an ImportError: the
+# third time (Oct 2026) the stale module was scrapers.rwitc, the missing name
+# was an attribute rather than an import, and the page was a redacted
+# AttributeError that needed a manual reboot.
+#
+# So each of our modules is stamped below with the mtime of the file it was
+# loaded from, and any whose file no longer matches its stamp is forgotten here
+# before the imports run. A module with no stamp at all was loaded by a version
+# of this file older than the stamping, and is treated the same way.
+_OWN_PACKAGES = ("db", "models", "scrapers", "ui")
+
+
+def _own_modules():
+    for name, module in list(sys.modules.items()):
+        path = getattr(module, "__file__", None)
+        if name.split(".")[0] in _OWN_PACKAGES and path and _APP_DIR in Path(path).parents:
+            yield name, module, path
+
+
+for _name, _module, _path in _own_modules():
+    try:
+        _unchanged = getattr(_module, "_source_mtime", None) == os.path.getmtime(_path)
+    except OSError:
+        _unchanged = False
+    if not _unchanged:
+        del sys.modules[_name]
 
 # WHY THESE IMPORTS ARE GUARDED
 #
@@ -68,6 +102,9 @@ process and it comes back. Nothing needs changing in the repository."""
     if _stale:
         st.caption("Modules already resident from an earlier deploy: " + ", ".join(_stale))
     st.stop()
+
+for _name, _module, _path in _own_modules():
+    _module._source_mtime = os.path.getmtime(_path)
 
 # layout="centered" (not "wide"): the primary use is a phone at the track, and
 # "wide" forces a desktop-width grid that squeezes content into a column on
