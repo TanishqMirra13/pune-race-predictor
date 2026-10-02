@@ -41,8 +41,10 @@ EMPTY_PAGE = "<html><body></body></html>"
 
 # Mumbai and Pune are one club on one feed, so a page says which course it is
 # for only in its heading: "PUNE MEETING 2026, NINTH DAY, ..." or
-# "MUMBAI MEETING 2025/26, FOURTH DAY, ...".
-MEETING_RE = re.compile(r"\b(PUNE|MUMBAI)\s+MEETING\b", re.I)
+# "MUMBAI MEETING 2025/26, FOURTH DAY, ...". The season and the comma after it
+# are part of the match on purpose: a full page also carries a download link
+# named "MUMBAI MEETING 2020-21 CHART.pdf", whatever course is racing.
+MEETING_RE = re.compile(r"\b(PUNE|MUMBAI)\s+MEETING\s+\d{4}(?:[/-]\d{2,4})?\s*,", re.I)
 
 CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "cache"
 
