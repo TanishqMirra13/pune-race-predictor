@@ -26,8 +26,10 @@ import requests
 from bs4 import BeautifulSoup
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-RACECARD_URL = "https://bangaloreraces.com/racing/racecard?d={date}"
-RACERESULT_URL = "https://bangaloreraces.com/racing/results?d={date}"
+# The www host, not the bare domain: as of Oct 2026 the bare domain serves a
+# certificate that does not cover it and every request fails TLS verification.
+RACECARD_URL = "https://www.bangaloreraces.com/racing/racecard?d={date}"
+RACERESULT_URL = "https://www.bangaloreraces.com/racing/results?d={date}"
 JOCKEY_STATS_URL = "https://www.bangaloreraces.com/Home/JockeyStats"
 TRAINER_STATS_URL = "https://www.bangaloreraces.com/home/trainerstats"
 
@@ -40,6 +42,12 @@ GRADE_RE = re.compile(r"Grade\s+([IVX]+)", re.I)
 
 def _get(url: str) -> str:
     resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=30)
+    # A date with no meeting used to come back as an empty template. It is now
+    # a bare HTTP 500 ("Fallback process failed" for a card, "Internal Server
+    # Error" for results), in season and out, so on these two routes a 500 is
+    # the calendar rather than an outage and parses as no races.
+    if resp.status_code == 500 and "/racing/" in url:
+        return ""
     resp.raise_for_status()
     return resp.text
 

@@ -462,12 +462,18 @@ races a few days a week, and several run seasonally), and caches each page under
 
 ## Data sources
 
-- **Pune & Mumbai (RWITC, same site, auto-detects venue by date):**
-  `https://rwitc.com/new/erp_racecard.php?date=YYYY-MM-DD` for per-horse entries
-  (rating, weight, jockey, trainer, last-5-runs form), and
-  `https://rwitc.com/erp_raceresult.php?date=YYYY-MM-DD` for finishing order,
-  times, tote dividends (WIN/PLACE/SHP/FOR/QNL/TNL) and the multi-leg pool
-  settlements (Super Jackpot, Jackpot with its 70%/30% tiers, and the trebles).
+- **Pune & Mumbai (RWITC, one feed for both courses):**
+  `https://www.rwitc.com/rwitc_website_api/Racecard_get_api.php?date=YYYY-MM-DD&type=raceCard&race_type=pre_race`
+  for per-horse entries (rating, weight, jockey, trainer, last-5-runs form), and
+  `.../raceResults_post_race_get_api.php?date=YYYY-MM-DD&type=raceResults&race_type=post_race`
+  for finishing order, times, tote dividends (WIN/PLACE/SHP/FOR/QNL/TNL) and the
+  multi-leg pool settlements (Super Jackpot, Jackpot with its 70%/30% tiers, and
+  the trebles). The club relaunched its site between Aug and Oct 2026: the old
+  `erp_racecard.php` / `erp_raceresult.php` pages now return an empty shell for
+  every date, and the same HTML is served inside a JSON envelope instead, so
+  the parsers are unchanged. The URL does not say which course a page is for —
+  only its heading does — so `rwitc.ForVenue` reads the heading and a Pune card
+  is never stored a second time as a Mumbai one.
   Note RWITC numbers races cumulatively across a season, so an eight-race Pune
   card can be races 26-33 — the pool tables give their legs as positions in the
   day's card, and `models/jackpot.py` translates by position for that reason.

@@ -30,7 +30,7 @@ from models import verticals
 # grouping into verticals lives in models/verticals.py; this table is just the
 # fetch dispatch.
 SCRAPER_BY_VENUE = {
-    "Pune": rwitc, "Mumbai": rwitc, "Bangalore": btc,
+    "Pune": rwitc.ForVenue("Pune"), "Mumbai": rwitc.ForVenue("Mumbai"), "Bangalore": btc,
     "Hyderabad": indiarace_cards.ForVenue("Hyderabad"),
     "Mysore": indiarace_cards.ForVenue("Mysore"),
     "Kolkata": indiarace_cards.ForVenue("Kolkata"),

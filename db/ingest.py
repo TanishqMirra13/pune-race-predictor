@@ -54,11 +54,15 @@ def store_workouts(conn: sqlite3.Connection, records: list[dict]) -> int:
 
 
 def store_racecard(conn: sqlite3.Connection, race_date: str, venue: str, races: list[dict]) -> None:
+    # circuit is written here rather than left to schema._migrate's backfill.
+    # Every reader filters on circuit='India', and the backfill only runs at
+    # startup -- so a card loaded for the first time was invisible to the very
+    # run that loaded it, and the daily routine reported "nothing loaded".
     for race in races:
         conn.execute(
             """INSERT INTO races (race_date, venue, race_number, race_name, class_code,
-                                   rating_band_min, rating_band_max, distance_m, source_doc)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'racecard')
+                                   rating_band_min, rating_band_max, distance_m, source_doc, circuit)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'racecard', 'India')
                ON CONFLICT(race_date, venue, race_number) DO UPDATE SET
                    race_name=excluded.race_name, class_code=excluded.class_code,
                    rating_band_min=excluded.rating_band_min, rating_band_max=excluded.rating_band_max,
@@ -117,8 +121,9 @@ def store_racecard(conn: sqlite3.Connection, race_date: str, venue: str, races: 
 def store_raceresult(conn: sqlite3.Connection, race_date: str, venue: str, races: list[dict]) -> None:
     for race in races:
         conn.execute(
-            """INSERT INTO races (race_date, venue, race_number, race_name, class_code, distance_m, source_doc)
-               VALUES (?, ?, ?, ?, ?, ?, 'raceresult')
+            """INSERT INTO races (race_date, venue, race_number, race_name, class_code, distance_m,
+                                   source_doc, circuit)
+               VALUES (?, ?, ?, ?, ?, ?, 'raceresult', 'India')
                ON CONFLICT(race_date, venue, race_number) DO UPDATE SET
                    race_name=excluded.race_name, class_code=excluded.class_code, distance_m=excluded.distance_m""",
             (race_date, venue, int(race["race_no"]), race["race_name"], race.get("class_code"),

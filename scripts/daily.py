@@ -58,7 +58,7 @@ from scrapers import btc, indiarace, indiarace_cards, rwitc  # noqa: E402
 STALE_ODDS_MINUTES = 90
 
 SCRAPER_BY_VENUE = {
-    "Pune": rwitc, "Mumbai": rwitc, "Bangalore": btc,
+    "Pune": rwitc.ForVenue("Pune"), "Mumbai": rwitc.ForVenue("Mumbai"), "Bangalore": btc,
     "Hyderabad": indiarace_cards.ForVenue("Hyderabad"),
     "Mysore": indiarace_cards.ForVenue("Mysore"),
     "Kolkata": indiarace_cards.ForVenue("Kolkata"),

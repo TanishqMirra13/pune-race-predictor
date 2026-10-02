@@ -82,7 +82,8 @@ inject_theme()
 init_db()
 conn = get_connection()
 
-# RWITC (Pune/Mumbai -- same site, auto-detects venue by date), BTC
+# RWITC (Pune/Mumbai -- one feed for both courses; rwitc.ForVenue reads the
+# page heading so a Pune card is never stored as a Mumbai one), BTC
 # (Bangalore, separate site), and indiarace_cards.ForVenue (Hyderabad/Mysore/
 # Kolkata/Delhi -- these four clubs have no scrapable racecard of their own;
 # see indiarace_cards.py's module docstring) all expose the same
@@ -90,7 +91,7 @@ conn = get_connection()
 # parse_raceresult interface, so the rest of the app doesn't need to know
 # which source it's talking to.
 SCRAPER_BY_VENUE = {
-    "Pune": rwitc, "Mumbai": rwitc, "Bangalore": btc,
+    "Pune": rwitc.ForVenue("Pune"), "Mumbai": rwitc.ForVenue("Mumbai"), "Bangalore": btc,
     "Hyderabad": indiarace_cards.ForVenue("Hyderabad"),
     "Mysore": indiarace_cards.ForVenue("Mysore"),
     "Kolkata": indiarace_cards.ForVenue("Kolkata"),

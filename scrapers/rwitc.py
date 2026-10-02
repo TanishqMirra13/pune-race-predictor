@@ -1,9 +1,20 @@
 """Scraper/parser for RWITC's race card and race result pages.
 
-Data source notes (verified against real pages, Nov 2025):
-- Race card:   https://rwitc.com/new/erp_racecard.php?date=YYYY-MM-DD
-- Race result: https://rwitc.com/erp_raceresult.php?date=YYYY-MM-DD
-Both are legacy nested-table HTML with no useful CSS hooks for most fields,
+Data source notes (verified live, Oct 2026):
+- Race card:   https://www.rwitc.com/rwitc_website_api/Racecard_get_api.php
+                   ?date=YYYY-MM-DD&type=raceCard&race_type=pre_race
+- Race result: https://www.rwitc.com/rwitc_website_api/raceResults_post_race_get_api.php
+                   ?date=YYYY-MM-DD&type=raceResults&race_type=post_race
+The club relaunched its site as a JavaScript front end some time between Aug
+and Oct 2026. The old erp_racecard.php / erp_raceresult.php pages now answer
+with an empty shell or a 404 for every date, including ones they used to
+serve, so a fetch against them reads as "no card published" on a race day.
+The data moved behind a JSON API that wraps the SAME legacy HTML in an
+envelope -- {"success": .., "data": {"html": ..}} -- so only the fetch changed
+and the parsers below are untouched. A date with no meeting comes back as a
+404 carrying {"success": false}.
+
+That HTML is legacy nested tables with no useful CSS hooks for most fields,
 but the text (extracted line-by-line via BeautifulSoup) follows a very
 consistent field order per horse/runner, which is what these parsers key off.
 """
@@ -15,11 +26,23 @@ import requests
 from bs4 import BeautifulSoup
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-RACECARD_URL = "https://rwitc.com/new/erp_racecard.php?date={date}"
-RACERESULT_URL = "https://rwitc.com/erp_raceresult.php?date={date}"
-JOCKEY_STATS_URL = "https://rwitc.com/new/jockeyStatistics.php"
-TRAINER_STATS_URL = "https://rwitc.com/new/trainerStatistics.php"
+API_BASE = "https://www.rwitc.com/rwitc_website_api/"
+RACECARD_URL = API_BASE + "Racecard_get_api.php?date={date}&type=raceCard&race_type=pre_race"
+RACERESULT_URL = (API_BASE + "raceResults_post_race_get_api.php"
+                  "?date={date}&type=raceResults&race_type=post_race")
+JOCKEY_STATS_URL = API_BASE + "jockey_statistics_get_api.php"
+TRAINER_STATS_URL = API_BASE + "trainer_statistics_get_api.php"
+# Still a plain page on the old site -- the one route the relaunch left alone.
 MONEY_LEADERS_URL = "https://rwitc.com/new/moneyLeaders.php"
+
+# What a "nothing for this date" answer is turned into. Not an empty string:
+# parse_raceresult falls back to soup.body, which an empty document lacks.
+EMPTY_PAGE = "<html><body></body></html>"
+
+# Mumbai and Pune are one club on one feed, so a page says which course it is
+# for only in its heading: "PUNE MEETING 2026, NINTH DAY, ..." or
+# "MUMBAI MEETING 2025/26, FOURTH DAY, ...".
+MEETING_RE = re.compile(r"\b(PUNE|MUMBAI)\s+MEETING\b", re.I)
 
 CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "cache"
 
@@ -49,8 +72,24 @@ EQUIPMENT_CODE_RE = re.compile(r"\(([A-Z]+)\)")
 
 def _get(url: str) -> str:
     resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=30)
+    if not url.startswith(API_BASE):
+        resp.raise_for_status()
+        return resp.text
+    # The API answers a date it has nothing for with a 404 whose body is still
+    # the JSON envelope, so the status alone cannot tell "no meeting" from
+    # "the endpoint has moved again". Read the envelope first.
+    try:
+        payload = resp.json()
+    except ValueError:
+        resp.raise_for_status()
+        raise ValueError(f"RWITC API returned something that is not JSON for {url}")
+    data = payload.get("data") or {}
+    if payload.get("success") and data.get("html"):
+        return data["html"]
+    if resp.status_code in (200, 404):
+        return EMPTY_PAGE
     resp.raise_for_status()
-    return resp.text
+    return EMPTY_PAGE
 
 
 def fetch_racecard_html(date: str, use_cache: bool = True) -> str:
@@ -175,7 +214,10 @@ def _fetch_cached(url: str, filename: str, use_cache: bool) -> str:
     if use_cache and path.exists():
         return path.read_text(encoding="utf-8", errors="ignore")
     html = _get(url)
-    path.write_text(html, encoding="utf-8")
+    # An empty answer is not cached: a card fetched before the club has
+    # published it would otherwise read as "no card" for the rest of the day.
+    if html != EMPTY_PAGE:
+        path.write_text(html, encoding="utf-8")
     time.sleep(1)  # be polite to a small club server
     return html
 
@@ -652,3 +694,49 @@ def _time_to_seconds(val: str):
     seconds = int(m.group(2))
     hundredths = int(m.group(3))
     return minutes * 60 + seconds + hundredths / 100
+
+
+def meeting_venue(html: str) -> str | None:
+    """Which RWITC course a card or result page is for, or None if it does not
+    say (a pasted fragment with the heading cut off, say)."""
+    m = MEETING_RE.search(html or "")
+    return m.group(1).title() if m else None
+
+
+class ForVenue:
+    """Binds one of RWITC's two courses to this module, for the same
+    {venue: scraper} dispatch tables indiarace_cards.ForVenue serves.
+
+    The club publishes one page per date, for whichever course is racing, and
+    the URL does not name it. Asked for Mumbai on a Pune day, the module-level
+    parsers would hand back the Pune card and it would be stored a second time
+    under Mumbai -- every race counted twice in the backtest. So a page whose
+    heading names the other course parses as empty here, which is what "no
+    Mumbai card today" actually means. A page that names no course is let
+    through rather than dropped.
+
+    Fetching and the season statistics are club-wide and pass straight through.
+    """
+
+    def __init__(self, venue: str):
+        if venue not in ("Pune", "Mumbai"):
+            raise ValueError(f"RWITC races at Pune and Mumbai, not {venue!r}")
+        self.venue = venue
+
+    def _mine(self, html: str) -> bool:
+        return meeting_venue(html) in (None, self.venue)
+
+    def parse_racecard(self, html: str) -> list[dict]:
+        return parse_racecard(html) if self._mine(html) else []
+
+    def parse_raceresult(self, html: str) -> list[dict]:
+        return parse_raceresult(html) if self._mine(html) else []
+
+    def parse_pool_dividends(self, html: str) -> list[dict]:
+        return parse_pool_dividends(html) if self._mine(html) else []
+
+    def __getattr__(self, name: str):
+        try:
+            return globals()[name]
+        except KeyError:
+            raise AttributeError(name) from None
