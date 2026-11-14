@@ -127,17 +127,34 @@ def _bets_from_archive(conn) -> list[dict]:
     return out
 
 
-def _roi(races: list[dict], lo: float, hi: float, market: str) -> tuple[int, int, float]:
-    """Stake 1 on every runner priced inside [lo, hi). Returns (bets, wins, roi)."""
-    bets = wins = 0
-    ret = 0.0
-    for d in races:
-        bets += sum(1 for p in d["prices"] if lo <= p < hi)
+def _band_arrays(races: list[dict], lo: float, hi: float, market: str):
+    """Per-race summary of one price band, as numpy arrays.
+
+    For each race: how many runners were priced inside [lo, hi) (bets), whether
+    the winner was one of them (won), and what that winner returned (ret).
+    Summarising once per band, instead of re-walking every runner for every
+    bootstrap draw, is what makes the confidence intervals cheap: the archive
+    is ~800 races and an interval needs 2,000 resamples of it, which as nested
+    Python loops took longer than a Streamlit Cloud visitor will wait."""
+    import numpy as np
+    n = len(races)
+    bets = np.zeros(n)
+    won = np.zeros(n)
+    ret = np.zeros(n)
+    for i, d in enumerate(races):
+        bets[i] = sum(1 for p in d["prices"] if lo <= p < hi)
         w = d["winner_ring"]
         if w is not None and lo <= w < hi:
-            wins += 1
-            ret += w if market == "ring" else (d["winner_tote"] or 0.0)
-    return bets, wins, ((ret - bets) / bets if bets else 0.0)
+            won[i] = 1.0
+            ret[i] = w if market == "ring" else (d["winner_tote"] or 0.0)
+    return bets, won, ret
+
+
+def _roi(races: list[dict], lo: float, hi: float, market: str) -> tuple[int, int, float]:
+    """Stake 1 on every runner priced inside [lo, hi). Returns (bets, wins, roi)."""
+    bets, won, ret = _band_arrays(races, lo, hi, market)
+    b = int(bets.sum())
+    return b, int(won.sum()), ((ret.sum() - b) / b if b else 0.0)
 
 
 def _bootstrap(races: list[dict], lo: float, hi: float, market: str,
@@ -146,21 +163,20 @@ def _bootstrap(races: list[dict], lo: float, hi: float, market: str,
 
     Deterministic seed so the app does not show a different interval on every
     rerun -- a confidence interval that flickers reads as noise about noise."""
-    import random
-    rng = random.Random(seed)
+    import numpy as np
     n = len(races)
     if n < 20:
         return (0.0, 0.0)
-    out = []
-    for _ in range(draws):
-        sample = [races[rng.randrange(n)] for _ in range(n)]
-        bets, _, roi = _roi(sample, lo, hi, market)
-        if bets:
-            out.append(roi)
-    if not out:
+    bets, _, ret = _band_arrays(races, lo, hi, market)
+    rng = np.random.default_rng(seed)
+    idx = rng.integers(0, n, size=(draws, n))
+    b = bets[idx].sum(axis=1)
+    r = ret[idx].sum(axis=1)
+    ok = b > 0
+    if not ok.any():
         return (0.0, 0.0)
-    out.sort()
-    return out[int(0.025 * len(out))], out[int(0.975 * len(out))]
+    roi = np.sort((r[ok] - b[ok]) / b[ok])
+    return float(roi[int(0.025 * len(roi))]), float(roi[int(0.975 * len(roi))])
 
 
 def measure_bands(conn, market: str = "ring", with_intervals: bool = True) -> list[dict]:
@@ -286,7 +302,8 @@ def qualify(ring_price: float | None, bands: list[dict],
     lo, hi = EDGE_BAND
     if lo <= ring_price < hi and band["roi"] > 0:
         ci = (f" (95% interval {band['ci_low'] * 100:+.0f}% to {band['ci_high'] * 100:+.0f}%, "
-              f"so it may be nothing)" if "ci_low" in band else "")
+              f"{'so it may be nothing' if band['ci_low'] <= 0 <= band['ci_high'] else 'clears zero only just'})"
+              if "ci_low" in band else "")
         return {"verdict": "BET", "band": band, "notes": notes,
                 "reason": f"{ring_price:.2f} sits in the one band the archive shows a positive "
                           f"return for: {band['win_rate'] * 100:.0f}% of these won against "

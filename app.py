@@ -182,7 +182,20 @@ with st.sidebar:
     st.header("Today's session")
 
     if "race_date_input" not in st.session_state:
-        st.session_state["race_date_input"] = next_saturday(date.today())
+        # Open on the nearest race day we actually hold a card for, today or
+        # later, rather than on "next Saturday". Indian clubs race on Sundays
+        # and weekdays too, and a default that lands on an empty Saturday means
+        # the first thing a visitor at the track sees is a blank app and the
+        # conclusion that it is broken. Falls back to next Saturday only when
+        # nothing upcoming is loaded.
+        _upcoming = conn.execute(
+            "SELECT MIN(race_date) d FROM races WHERE circuit='India' AND race_date >= ?",
+            (date.today().strftime("%Y-%m-%d"),),
+        ).fetchone()
+        st.session_state["race_date_input"] = (
+            date.fromisoformat(_upcoming["d"]) if _upcoming and _upcoming["d"]
+            else next_saturday(date.today())
+        )
     col_today, col_sat = st.columns(2)
     if col_today.button("Today", use_container_width=True):
         st.session_state["race_date_input"] = date.today()
@@ -201,8 +214,12 @@ with st.sidebar:
     # Grouped by vertical rather than listed flat. Which authority a venue
     # belongs to decides its season, its data source and which fields come back
     # populated, so it is the first thing worth seeing next to the name.
+    # Pre-select a venue that has a card on this date. Defaulting to the first
+    # name in the list (Mumbai) meant a Pune or Hyderabad race day opened on an
+    # empty page until the visitor noticed the picker.
+    _default_venue = next((i for i, v in enumerate(VENUES) if v in loaded_venues), 0)
     venue = st.selectbox(
-        "Venue", VENUES,
+        "Venue", VENUES, index=_default_venue,
         format_func=lambda v: ("● " if v in loaded_venues else "")
         + verticals.label(v),
     )
@@ -335,7 +352,47 @@ def ui_odds_map(race_id: int, session_map: dict | None) -> dict:
     return out
 
 
-def get_race_plans(d: str, v: str) -> list[dict]:
+def _data_fingerprint() -> tuple:
+    """A cheap stamp that changes whenever anything the scores depend on does.
+
+    Scoring every runner in a day's races is the slowest thing this app does,
+    and Streamlit re-runs the whole script on every tap -- so tapping through
+    R1..R8 at the track re-scored the entire card eight times, which on the
+    free cloud CPU is the difference between a snappy page and one that looks
+    broken. The scores only change when the data does (a scratching, a result,
+    a new price, refreshed jockey stats), so they are cached against this stamp
+    and recomputed the moment any of those move."""
+    return tuple(conn.execute(
+        """SELECT
+             (SELECT COUNT(*) FROM runs),
+             (SELECT COALESCE(SUM(scratched), 0) FROM runs),
+             (SELECT COUNT(*) FROM results),
+             (SELECT COUNT(*) FROM races),
+             (SELECT COUNT(*) FROM market_odds),
+             (SELECT COALESCE(MAX(captured_at), '') FROM market_odds),
+             (SELECT COUNT(*) FROM connection_stats),
+             (SELECT COALESCE(MAX(fetched_at), '') FROM connection_stats),
+             (SELECT COUNT(*) FROM workouts)"""
+    ).fetchone())
+
+
+# NOTE the parameter is deliberately called `fingerprint`, not `_fingerprint`:
+# Streamlit leaves any underscore-prefixed argument OUT of the cache key, so an
+# underscore here would silently turn the cache into one that never refreshes
+# and keeps showing a horse as the pick after it has been scratched.
+@st.cache_data(show_spinner="Scoring the card...", max_entries=8)
+def _cached_race_plans(d: str, v: str, fingerprint: tuple) -> list[dict]:
+    return _get_race_plans(d, v)
+
+
+@st.cache_data(show_spinner="Scoring the day's races...", max_entries=4, ttl=120)
+def _cached_slate(d: str, fingerprint: tuple) -> list[dict]:
+    # ttl as well as the stamp: each race carries odds_age_min, which grows with
+    # the clock rather than with any row changing.
+    return _get_slate(d)
+
+
+def _get_race_plans(d: str, v: str) -> list[dict]:
     rows = conn.execute(
         "SELECT id, race_number, race_name, class_code, distance_m FROM races "
         "WHERE race_date=? AND venue=? ORDER BY race_number", (d, v),
@@ -350,7 +407,7 @@ def get_race_plans(d: str, v: str) -> list[dict]:
     return plans
 
 
-def get_slate(d: str) -> list[dict]:
+def _get_slate(d: str) -> list[dict]:
     """Every Indian race on a date, across ALL venues and verticals, with model
     scores and whatever market prices we hold.
 
@@ -389,8 +446,9 @@ def get_slate(d: str) -> list[dict]:
 STALE_ODDS_MINUTES = 90
 
 
-race_plans = get_race_plans(date_str, venue) if venue else []
-slate = get_slate(date_str)
+_fingerprint = _data_fingerprint()
+race_plans = _cached_race_plans(date_str, venue, _fingerprint) if venue else []
+slate = _cached_slate(date_str, _fingerprint)
 
 # Tab order is deliberate. "Edge" comes first because it is the only screen in
 # the app built on a measured return rather than on a model opinion, and it is
@@ -453,16 +511,27 @@ with tab_edge:
         _edge_band = next((b for b in _bands
                            if (b["lo"], b["hi"]) == edge.EDGE_BAND), None)
         if _edge_band and "ci_low" in _edge_band:
+            # The wording follows the interval rather than asserting it: this
+            # band's interval touched zero on 167 bets and no longer does on
+            # the larger archive, and a caveat that says "touches zero" over an
+            # interval that doesn't is the same kind of error in the other
+            # direction.
+            _touches = _edge_band["ci_low"] <= 0 <= _edge_band["ci_high"]
+            _verdict = (
+                "it touches zero, so this may be nothing."
+                if _touches else
+                "it now clears zero, but only just, and it is one of seven bands that were "
+                "looked at -- pick the best of seven and some of that is luck. Not yet a "
+                "number to size up on."
+            )
             st.warning(
                 f"**Read the interval before sizing anything.** The one paying band is "
-                f"{_edge_band['roi'] * 100:+.1f}% over {_edge_band['bets']} bets, but its 95% "
+                f"{_edge_band['roi'] * 100:+.1f}% over {_edge_band['bets']} bets, and its 95% "
                 f"interval runs {_edge_band['ci_low'] * 100:+.0f}% to "
-                f"{_edge_band['ci_high'] * 100:+.0f}% — it touches zero, so this may be nothing. "
-                f"What keeps it alive is that it comes out about the same in both halves of the "
-                f"archive by date and is positive at five of six venues, and that "
-                f"favourite–longshot bias is the most replicated inefficiency in racing. Treat it "
-                f"as a hypothesis you are staking small money on, and log every bet below so it "
-                f"gets settled by evidence."
+                f"{_edge_band['ci_high'] * 100:+.0f}% — {_verdict} "
+                f"Favourite–longshot bias is the most replicated inefficiency in racing, which "
+                f"counts for it. Treat it as a hypothesis you are staking small money on, and "
+                f"log every bet below so it gets settled by evidence."
             )
 
         _fa = edge.favourite_agreement(conn)
