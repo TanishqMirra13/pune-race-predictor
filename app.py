@@ -3,6 +3,7 @@ import sys
 from datetime import date, timedelta
 from pathlib import Path
 
+import requests
 import streamlit as st
 
 _APP_DIR = Path(__file__).resolve().parent
@@ -242,9 +243,47 @@ with st.sidebar:
     with col1:
         if st.button("Fetch live", use_container_width=True):
             try:
-                html = source.fetch_racecard_html(date_str, use_cache=False)
-                races = source.parse_racecard(html)
-                if not races:
+                try:
+                    html = source.fetch_racecard_html(date_str, use_cache=False)
+                except requests.HTTPError as http_err:
+                    if http_err.response is None or http_err.response.status_code != 403:
+                        raise
+                    # RWITC's firewall refuses Streamlit Cloud's server
+                    # addresses (it answers from a home connection). Do the
+                    # useful thing rather than just reporting it.
+                    _held = conn.execute(
+                        "SELECT COUNT(*) n FROM races WHERE race_date=? AND venue=?",
+                        (date_str, venue)).fetchone()["n"]
+                    if _held:
+                        st.info(
+                            f"**{venue}'s card for {date_str} is already loaded "
+                            f"({_held} races)** -- nothing is missing. RWITC refuses requests "
+                            f"from this hosting service, so it can't be refreshed from here. "
+                            f"To pick up late withdrawals, use the app on your own computer."
+                        )
+                        html = None
+                    elif venue in ("Pune", "Mumbai"):
+                        # Nothing stored, so a fallback can't collide with an
+                        # existing card. indiarace carries the same meeting with
+                        # thinner detail (no breeder or stud). Its races are
+                        # numbered 1..N, not RWITC's season-long numbering, which
+                        # is why this is only done when no card is held.
+                        _alt = indiarace_cards.ForVenue(venue)
+                        html = _alt.fetch_racecard_html(date_str, use_cache=False)
+                        source = _alt
+                        st.warning(
+                            "RWITC refuses requests from this hosting service, so this card "
+                            "came from indiarace instead -- same races, less detail."
+                        )
+                    else:
+                        raise
+                if html is None:
+                    races = None
+                else:
+                    races = source.parse_racecard(html)
+                if races is None:
+                    pass
+                elif not races:
                     st.error(
                         f"No card published for {venue} on {date_str}. Indian clubs race a few "
                         f"days a week and several run seasonally, so an empty card is usually "
@@ -279,6 +318,16 @@ with st.sidebar:
                     n_pools = store_pool_dividends(conn, date_str, venue, pools) if pools else 0
                     st.success(f"Loaded results for {len(races)} races"
                                + (f", plus {n_pools} pool settlements." if n_pools else "."))
+            except requests.HTTPError as e:
+                if e.response is not None and e.response.status_code == 403:
+                    st.error(
+                        f"{venue}'s club site refuses requests from this hosting service, so "
+                        f"results can't be fetched from here. Load them from the app running on "
+                        f"your own computer (`python -m scripts.daily --results {date_str}`), "
+                        f"then push the database."
+                    )
+                else:
+                    st.error(f"Fetch failed: {e}")
             except Exception as e:
                 st.error(f"Fetch failed: {e}")
 

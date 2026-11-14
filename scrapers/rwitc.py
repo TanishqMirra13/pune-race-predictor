@@ -27,6 +27,20 @@ from bs4 import BeautifulSoup
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 API_BASE = "https://www.rwitc.com/rwitc_website_api/"
+
+# Headers a browser visiting rwitc.com would send. From a home connection the
+# API answers any User-Agent, but from Streamlit Cloud's datacenter addresses
+# it answers 403 -- a firewall decision about the address, which no header can
+# be relied on to change. These cost nothing and are what a visitor looks like,
+# so they stay; the app's real answer to the 403 is in app.py (use the card
+# already stored, or fall back to indiarace when there is none).
+BROWSER_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-IN,en;q=0.9",
+    "Referer": "https://www.rwitc.com/",
+}
 RACECARD_URL = API_BASE + "Racecard_get_api.php?date={date}&type=raceCard&race_type=pre_race"
 RACERESULT_URL = (API_BASE + "raceResults_post_race_get_api.php"
                   "?date={date}&type=raceResults&race_type=post_race")
@@ -73,7 +87,7 @@ EQUIPMENT_CODE_RE = re.compile(r"\(([A-Z]+)\)")
 
 
 def _get(url: str) -> str:
-    resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=30)
+    resp = requests.get(url, headers=BROWSER_HEADERS, timeout=30)
     if not url.startswith(API_BASE):
         resp.raise_for_status()
         return resp.text
